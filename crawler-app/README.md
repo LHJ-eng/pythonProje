@@ -134,6 +134,23 @@ copy .env.example .env
 python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
+### 方式 C：PyCharm（新手推荐，每次点绿色三角即可）
+
+1. PyCharm → `File → Open`，选择 `crawler-app` 文件夹。
+2. `Settings → Project → Python Interpreter → Add Interpreter → Virtualenv`，新建 `.venv`（Python 3.11/3.12）。
+3. 打开底部 Terminal（已自动激活虚拟环境），执行 `pip install -r requirements.txt`。
+4. 在项目根目录新建 `.env` 文件（或复制 `.env.example`），写入：
+   ```
+   APP_PASSWORD=你的密码
+   COOKIE_SECURE=false
+   ```
+5. 右键 `start.py` → `Run 'start'`。
+6. 打开 `http://127.0.0.1:8000`，输入密码使用。
+7. 停止：点 PyCharm 运行窗口的红色方块。
+
+以后每次只需：打开项目 → 点顶部绿色三角（运行配置会自动保留）→ 浏览器登录。
+
+
 **完全不设置密码时**：首次启动会自动生成随机密码，保存到 `data/initial_password.txt`（权限 600），并打印在控制台；之后重启会复用该密码。登录后请尽快在 `.env` 设置自己的 `APP_PASSWORD` 并删除该文件。
 
 ### 可选能力
