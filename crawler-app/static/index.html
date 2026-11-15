@@ -30,15 +30,15 @@
 
       <label class="label">数据来源</label>
       <div class="segmented" id="source-tabs">
-        <button class="active" data-source="url">网页链接</button>
-        <button data-source="html">粘贴 / 上传 HTML</button>
+        <button class="active" data-source="url">网页 / 图片链接</button>
+        <button data-source="image">本地图片识别</button>
+        <button data-source="html">HTML 源码</button>
       </div>
 
       <div id="pane-url">
         <input id="url" type="text" spellcheck="false"
                placeholder="https://example.com/list?page={page}">
-        <p class="hint">多页采集时在 URL 中用 <code>{page}</code> 占位，例如
-          <code>https://a.com/list?page={page}</code>，页数填 3 即抓 1~3 页。</p>
+        <p class="hint">粘贴网页或 JPG / PNG / WebP 图片地址，直接点击「开始抓取」。多页规则请在高级设置中配置。</p>
       </div>
 
       <div id="pane-html" hidden>
@@ -54,11 +54,24 @@
         </div>
       </div>
 
+      <div id="pane-image" hidden>
+        <label class="file-btn image-file-btn" for="image-file">选择 JPG / PNG / WebP 图片</label>
+        <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
+        <div id="image-name" class="hint">尚未选择图片</div>
+        <img id="image-preview" class="image-preview" alt="待识别图片预览" hidden>
+        <p class="hint">支持中文文字和统计表图片，最大 10 MB、2000 万像素。识别结果可导出 Excel / CSV。</p>
+      </div>
+
+      <p class="hint" id="primary-hint">无需填写选择器。智能模式会自动识别表格、重复列表、正文；图片链接会自动进行文字识别。</p>
+
+      <details class="advanced" id="advanced">
+        <summary>高级设置（手动规则、分页、JS 渲染）</summary>
       <div class="grid2">
         <div>
           <label class="label" for="mode">提取方式</label>
           <select id="mode">
-            <option value="table">自动识别表格</option>
+            <option value="auto" selected>智能识别（推荐）</option>
+            <option value="table">手动 HTML 表格</option>
             <option value="css">CSS 选择器（列表 / 卡片）</option>
             <option value="article">正文文章</option>
           </select>
@@ -108,6 +121,7 @@
         <input id="ignore-robots" type="checkbox">
         忽略 robots.txt（请确认你拥有抓取授权）
       </label>
+      </details>
 
       <div class="actions">
         <button class="ghost" id="analyze" type="button">分析页面结构</button>

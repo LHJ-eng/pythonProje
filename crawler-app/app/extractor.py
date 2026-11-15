@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass, field
 from typing import Iterable
 from urllib.parse import urljoin
@@ -315,6 +316,485 @@ def extract_article(html: str, url: str) -> Extraction:
     return Extraction(columns=columns, rows=rows)
 
 
+_AUTO_BLOCKED_ANCESTORS = {"nav", "header", "footer", "aside", "form"}
+_AUTO_TEXT_TAGS = {"p", "span", "strong", "em", "small", "time", "div"}
+_AUTO_LEAF_TAGS = {
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "a",
+    "strong", "em", "small", "time", "img", "div",
+}
+
+
+def _safe_css_ident(value: str) -> bool:
+    return bool(re.fullmatch(r"-?[_a-zA-Z]+[_a-zA-Z0-9-]*", value or ""))
+
+
+def _auto_hidden(tag) -> bool:
+    if tag.has_attr("hidden") or str(tag.get("aria-hidden", "")).lower() == "true":
+        return True
+    style = str(tag.get("style", "")).replace(" ", "").lower()
+    return "display:none" in style or "visibility:hidden" in style
+
+
+def _auto_blocked(tag) -> bool:
+    if _auto_hidden(tag):
+        return True
+    return any(
+        getattr(parent, "name", "") in _AUTO_BLOCKED_ANCESTORS
+        for parent in tag.parents
+    )
+
+
+def _structure_signature(item) -> set[str]:
+    paths: set[str] = set()
+    visited = 0
+
+    def walk(node, prefix: str, depth: int) -> None:
+        nonlocal visited
+        if depth > 3 or visited >= 100:
+            return
+        for child in node.find_all(recursive=False):
+            if _auto_hidden(child):
+                continue
+            visited += 1
+            path = f"{prefix}>{child.name}" if prefix else child.name
+            paths.add(path)
+            walk(child, path, depth + 1)
+
+    walk(item, "", 0)
+    return paths
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 1.0
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+def _nth_of_type(tag) -> str:
+    siblings = [node for node in tag.parent.find_all(tag.name, recursive=False)]
+    return f"{tag.name}:nth-of-type({siblings.index(tag) + 1})"
+
+
+def _auto_parent_selector(parent, soup) -> str:
+    if getattr(parent, "name", None) in {"body", "[document]", None}:
+        return "body"
+    parent_id = str(parent.get("id", ""))
+    if _safe_css_ident(parent_id) and len(soup.select(f"#{parent_id}")) == 1:
+        return f"#{parent_id}"
+    classes = [str(value) for value in parent.get("class", [])]
+    safe_classes = [value for value in classes if _safe_css_ident(value)]
+    if safe_classes:
+        return f"{parent.name}.{safe_classes[0]}"
+
+    segments: list[str] = []
+    current = parent
+    while getattr(current, "name", None) not in {"body", "[document]", None}:
+        current_id = str(current.get("id", ""))
+        if _safe_css_ident(current_id):
+            segments.append(f"#{current_id}")
+            break
+        segments.append(_nth_of_type(current))
+        current = current.parent
+    else:
+        segments.append("body")
+    return " > ".join(reversed(segments))
+
+
+def _auto_relative_selector(item, node) -> str:
+    classes = [str(value) for value in node.get("class", [])]
+    safe_classes = [value for value in classes if _safe_css_ident(value)]
+    if safe_classes:
+        return f"{node.name}.{safe_classes[0]}"
+    segments: list[str] = []
+    current = node
+    while current is not item and getattr(current, "name", None) not in {None, "[document]"}:
+        segments.append(_nth_of_type(current))
+        current = current.parent
+    return " > ".join(reversed(segments))
+
+
+def _auto_field_name(node, attr: str) -> str:
+    semantic = " ".join(
+        [str(node.get("id", "")), *[str(v) for v in node.get("class", [])]]
+    ).lower()
+    if attr == "href":
+        return "链接"
+    if attr == "src":
+        return "图片"
+    if node.name in {"h1", "h2", "h3", "h4", "h5", "h6"} or re.search(
+        r"title|heading", semantic
+    ):
+        return "标题"
+    if re.search(r"price|amount|cost", semantic):
+        return "价格"
+    if re.search(r"author|writer|byline", semantic):
+        return "作者"
+    if node.name == "time" or re.search(r"date|time|publish", semantic):
+        return "日期"
+    if re.search(r"tag|category|label", semantic):
+        return "标签"
+    if re.search(r"name", semantic):
+        return "名称"
+    if re.search(r"desc|summary|content|text|intro", semantic):
+        return "内容"
+    if node.name == "a":
+        return "链接文字"
+    return "字段"
+
+
+def _auto_field_priority(node, attr: str, name: str) -> int:
+    if node.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        return 100
+    if name in {"标题", "名称", "价格", "作者", "日期", "内容"}:
+        return 90
+    if attr in {"href", "src"}:
+        return 75
+    if node.name == "time":
+        return 80
+    if node.name == "p":
+        return 55
+    if node.name == "a":
+        return 45
+    if node.name in {"span", "strong", "small", "em"}:
+        return 40
+    return 25
+
+
+def _auto_candidate_nodes(item) -> list:
+    nodes = []
+    seen: set[int] = set()
+    for node in item.find_all(_AUTO_LEAF_TAGS):
+        if _auto_hidden(node) or id(node) in seen:
+            continue
+        if node.name in _AUTO_TEXT_TAGS and node.name not in {"time"}:
+            if node.find(list(_AUTO_LEAF_TAGS - {"div"}), recursive=True):
+                continue
+        text = _collapse(node.get_text(" ", strip=True))
+        if node.name != "img" and not text:
+            continue
+        nodes.append(node)
+        seen.add(id(node))
+    return nodes
+
+
+def _infer_auto_fields(items: list) -> tuple[list[dict], float]:
+    sample = items[:12]
+    candidates: dict[tuple[str, str], dict] = {}
+    for item in sample:
+        for node in _auto_candidate_nodes(item):
+            selector = _auto_relative_selector(item, node)
+            specs = [("text", _auto_field_name(node, "text"))]
+            if node.name == "a" and node.get("href"):
+                specs.append(("href", "链接"))
+            if node.name == "img" and node.get("src"):
+                specs.append(("src", "图片"))
+            for attr, name in specs:
+                key = (selector, attr)
+                candidates.setdefault(
+                    key,
+                    {
+                        "name": name,
+                        "selector": selector,
+                        "attr": attr,
+                        "priority": _auto_field_priority(node, attr, name),
+                    },
+                )
+
+    accepted = []
+    for spec in candidates.values():
+        values = []
+        for item in sample:
+            try:
+                node = item.select_one(spec["selector"])
+            except Exception:
+                node = None
+            if node is None:
+                values.append("")
+                continue
+            if spec["attr"] == "text":
+                values.append(_collapse(node.get_text(" ", strip=True)))
+            else:
+                values.append(str(node.get(spec["attr"], "") or ""))
+        coverage = sum(bool(value) for value in values) / max(len(sample), 1)
+        if coverage < 0.6:
+            continue
+        spec["coverage"] = coverage
+        spec["values"] = values
+        accepted.append(spec)
+
+    accepted.sort(
+        key=lambda spec: (-spec["priority"], -spec["coverage"], spec["selector"], spec["attr"])
+    )
+    fields: list[dict] = []
+    text_signatures: list[tuple[str, ...]] = []
+    coverages: list[float] = []
+    for spec in accepted:
+        signature = tuple(spec["values"])
+        if spec["attr"] == "text" and any(signature == old for old in text_signatures):
+            continue
+        fields.append({
+            "name": spec["name"],
+            "selector": spec["selector"],
+            "attr": spec["attr"],
+        })
+        coverages.append(spec["coverage"])
+        if spec["attr"] == "text":
+            text_signatures.append(signature)
+        if len(fields) >= 6:
+            break
+    return fields, (sum(coverages) / len(coverages) if coverages else 0.0)
+
+
+def _best_auto_table(html: str) -> tuple[Extraction, dict] | None:
+    best = None
+    for table in parse_tables(html):
+        row_count = len(table.rows)
+        column_count = len(table.headers)
+        if row_count < 2 or column_count < 2:
+            continue
+        cells = [cell for row in table.rows for cell in row]
+        if not cells:
+            continue
+        nonempty = sum(bool(cell.strip()) for cell in cells) / len(cells)
+        if nonempty < 0.2:
+            continue
+        widths = [sum(bool(cell.strip()) for cell in row) for row in table.rows]
+        common_width = statistics.mode(widths)
+        consistency = sum(width == common_width for width in widths) / len(widths)
+        first_values = [row[0].strip() for row in table.rows if row and row[0].strip()]
+        uniqueness = len(set(first_values)) / len(first_values) if first_values else 0.0
+        score = (
+            0.25 * min(row_count / 5, 1)
+            + 0.15 * min((column_count - 1) / 3, 1)
+            + 0.20 * nonempty
+            + 0.15 * consistency
+            + 0.10 * float(table.has_thead)
+            + 0.15 * uniqueness
+        )
+        average_length = sum(len(cell) for cell in cells) / len(cells)
+        if average_length > 300:
+            score -= 0.15
+        score = max(0.0, min(score, 1.0))
+        if best is None or score > best[0]:
+            best = (score, table)
+    if best is None:
+        return None
+
+    score, table = best
+    first_row_header = False
+    if not table.has_thead and len(table.rows) >= 3:
+        first = table.rows[0]
+        unique_first = len(set(first)) == len(first)
+        numeric_evidence = False
+        for index, value in enumerate(first):
+            later = [row[index] for row in table.rows[1:] if index < len(row) and row[index]]
+            if value or not later:
+                if value and not _looks_numeric(value) and later:
+                    numeric_ratio = sum(_looks_numeric(cell) for cell in later) / len(later)
+                    numeric_evidence = numeric_evidence or numeric_ratio >= 0.7
+        first_row_header = bool(
+            all(first) and unique_first and numeric_evidence
+        )
+    extraction = extract_table(
+        parse_tables(html), table_index=table.index, first_row_header=first_row_header
+    )
+    return extraction, {
+        "mode": "table",
+        "score": round(score, 3),
+        "reason": f"检测到 {len(table.rows)} 行 × {len(table.headers)} 列的数据表",
+        "table_index": table.index,
+        "first_row_header": first_row_header,
+    }
+
+
+def _looks_numeric(value: str) -> bool:
+    value = value.strip()
+    return bool(
+        re.search(r"\d", value)
+        and re.fullmatch(r"[\d\s,.%+\-−–—/():：￥¥$€]+", value)
+    )
+
+
+def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
+    soup = make_soup(html)
+    best = None
+    parents = soup.find_all(True)[:200]
+    for parent in parents:
+        if parent.find_parent("table") is not None or parent.name == "table":
+            continue
+        if _auto_blocked(parent):
+            continue
+        children = [
+            child for child in parent.find_all(recursive=False)
+            if not _auto_hidden(child)
+        ]
+        if len(children) < 3:
+            continue
+        groups: dict[str, list] = {}
+        for child in children:
+            groups.setdefault(child.name, []).append(child)
+        for tag_name, items in groups.items():
+            if len(items) < 3 or len(items) / len(children) < 0.5:
+                continue
+            if any(_auto_blocked(item) for item in items):
+                continue
+            sample = items[:12]
+            signatures = [_structure_signature(item) for item in sample]
+            if not any(signatures):
+                continue
+            medoid = max(
+                signatures,
+                key=lambda signature: sum(
+                    _jaccard(signature, other) for other in signatures
+                ),
+            )
+            similarities = [_jaccard(medoid, signature) for signature in signatures]
+            median_similarity = statistics.median(similarities)
+            if median_similarity < 0.55:
+                continue
+            if sum(value >= 0.5 for value in similarities) / len(similarities) < 0.7:
+                continue
+
+            common_classes = set(str(v) for v in items[0].get("class", []))
+            for item in items[1:]:
+                common_classes.intersection_update(str(v) for v in item.get("class", []))
+            common_classes = {value for value in common_classes if _safe_css_ident(value)}
+            item_part = tag_name + "".join(f".{value}" for value in sorted(common_classes))
+            selector = f"{_auto_parent_selector(parent, soup)} > {item_part}"
+            try:
+                matched = soup.select(selector)
+            except Exception:
+                continue
+            original_count = sum(any(node is item for item in items) for node in matched)
+            if original_count / len(items) < 0.8 or len(matched) > max(len(items) * 1.5, len(items) + 2):
+                continue
+
+            fields, field_coverage = _infer_auto_fields(items)
+            if not fields:
+                continue
+            try:
+                extraction = extract_css(html, base_url, selector, fields)
+            except ExtractionError:
+                continue
+            texts = [_collapse(item.get_text(" ", strip=True)) for item in sample]
+            unique_ratio = len(set(texts)) / len(texts) if texts else 0.0
+            average_length = sum(len(text) for text in texts) / max(len(texts), 1)
+            score = (
+                0.25 * min(len(items) / 5, 1)
+                + 0.20 * median_similarity
+                + 0.20 * field_coverage
+                + 0.15 * unique_ratio
+                + 0.10 * min(len(fields) / 3, 1)
+                + 0.10 * (len(items) / len(children))
+            )
+            simple_links = all(signature <= {"a"} for signature in signatures)
+            if simple_links:
+                score -= 0.25
+            if average_length < 8:
+                score -= 0.15
+            score = max(0.0, min(score, 1.0))
+            if best is None or score > best[0]:
+                best = (score, extraction, selector, fields, len(items), median_similarity)
+    if best is None:
+        return None
+    score, extraction, selector, fields, count, similarity = best
+    return extraction, {
+        "mode": "css",
+        "score": round(score, 3),
+        "reason": f"检测到 {count} 个结构相似的重复条目",
+        "item_selector": selector,
+        "fields": fields,
+        "similarity": round(similarity, 3),
+    }
+
+
+def extract_auto(
+    html: str, base_url: str, rule: dict | None = None
+) -> tuple[Extraction, dict]:
+    """智能识别表格、重复列表或正文；后续页可复用第一页规则。"""
+    if rule:
+        mode = rule.get("mode")
+        if mode == "table":
+            extraction = extract_table(
+                parse_tables(html),
+                table_index=rule.get("table_index"),
+                first_row_header=bool(rule.get("first_row_header")),
+            )
+        elif mode == "css":
+            extraction = extract_css(
+                html,
+                base_url,
+                str(rule.get("item_selector", "")),
+                list(rule.get("fields", [])),
+            )
+        elif mode == "article":
+            extraction = extract_article(html, base_url)
+        else:
+            raise ExtractionError("自动识别规则无效，请重新抓取第一页")
+        return extraction, rule
+
+    soup = make_soup(html)
+    if soup.find("frameset"):
+        raise ExtractionError(
+            "这是框架目录页，请打开具体框架页面；若统计表是图片，请直接输入图片 URL"
+        )
+
+    candidates: list[tuple[Extraction, dict]] = []
+    table_candidate = _best_auto_table(html)
+    if table_candidate:
+        candidates.append(table_candidate)
+    try:
+        list_candidate = _best_auto_list(html, base_url)
+    except ExtractionError:
+        list_candidate = None
+    if list_candidate:
+        candidates.append(list_candidate)
+
+    article_candidate = None
+    article_score = 0.0
+    try:
+        article = extract_article(html, base_url)
+        body = article.rows[0][-1] if article.rows else ""
+        article_score = min(len(body) / 600, 1) * 0.8 + 0.2 * bool(article.rows[0][0])
+        article_candidate = (article, {
+            "mode": "article",
+            "score": round(article_score, 3),
+            "reason": f"检测到约 {len(body)} 字的正文内容",
+        })
+    except (ExtractionError, IndexError):
+        pass
+
+    best_structured = max(candidates, key=lambda item: item[1]["score"]) if candidates else None
+    low_confidence = False
+    if best_structured and best_structured[1]["score"] >= 0.60:
+        extraction, detected = best_structured
+    elif article_candidate and article_score >= 0.55:
+        extraction, detected = article_candidate
+    elif best_structured and best_structured[1]["score"] >= 0.45:
+        extraction, detected = best_structured
+        low_confidence = True
+    elif article_candidate and article_candidate[0].rows[0][-1].strip():
+        extraction, detected = article_candidate
+        low_confidence = True
+    else:
+        raise ExtractionError(
+            "未能自动识别有效数据。若是 JS 动态页面请尝试浏览器渲染；"
+            "若仍失败，请在高级设置中手动指定提取规则"
+        )
+
+    detected = dict(detected)
+    detected["candidates"] = {
+        "table": table_candidate[1]["score"] if table_candidate else 0,
+        "list": list_candidate[1]["score"] if list_candidate else 0,
+        "article": round(article_score, 3),
+    }
+    if low_confidence:
+        detected["low_confidence"] = True
+        extraction.warnings.append("自动识别置信度较低，请核对预览；不准确时请使用高级模式")
+    return extraction, detected
+
+
 def analyze_page(html: str, url: str) -> dict:
     """返回页面结构摘要，供前端选择表格 / 预览正文。"""
     soup = make_soup(html)
@@ -328,6 +808,17 @@ def analyze_page(html: str, url: str) -> dict:
         article_preview = ""
         article_len = 0
 
+    try:
+        auto_extraction, auto_rule = extract_auto(html, url)
+        auto_summary = {
+            **auto_rule,
+            "rows": len(auto_extraction.rows),
+            "columns": auto_extraction.columns,
+            "preview": auto_extraction.rows[:3],
+        }
+    except ExtractionError as exc:
+        auto_summary = {"mode": None, "error": str(exc)}
+
     title = _meta(soup, "og:title") or ""
     if not title:
         h1 = soup.find("h1")
@@ -338,6 +829,7 @@ def analyze_page(html: str, url: str) -> dict:
     return {
         "title": title,
         "url": url,
+        "auto": auto_summary,
         "tables": [
             {
                 "index": t.index,

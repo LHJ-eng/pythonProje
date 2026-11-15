@@ -196,7 +196,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings,
                     browser=body.browser,
                     ignore_robots=body.ignore_robots,
+                    allow_image=True,
                 )
+                if result.kind == "image":
+                    return {
+                        "title": "图片文字识别",
+                        "url": result.url,
+                        "image": True,
+                        "tables": [],
+                        "article": {"length": 0, "preview": ""},
+                        "auto": {
+                            "mode": "ocr",
+                            "score": 1.0,
+                            "reason": "检测到图片，点击开始抓取即可识别文字",
+                            "content_type": result.content_type,
+                        },
+                        "links": 0,
+                        "chars": len(result.body),
+                    }
                 return analyze_page(result.html, result.url)
         except (FetchError, InvalidURLError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1,27 +1,29 @@
 # DataHarvester · 自托管网页数据采集系统
 
-输入一个网页链接（或直接粘贴 / 上传 HTML），把页面里的**表格、列表卡片、正文文章**抽取成结构化数据，在线预览并导出 **CSV / Excel / JSON / HTML 报告**。带**密码门禁**，可完全本地部署，数据不经过任何第三方服务。
+输入一个网页链接，系统会自动识别页面里的**表格、列表卡片、正文文章**；输入图片链接或上传本地图片，则使用本地中文 OCR 提取文字。结果可在线预览并导出 **CSV / Excel / JSON / HTML 报告**。带**密码门禁**，可完全本地部署，网页数据和图片不会发送给第三方 AI 服务。
 
 > 适合个人或小团队做公开数据采集、竞品价格监控、内容归档、报表取数。
 > 请只采集你有权访问的数据，并遵守目标站点服务条款、robots.txt 与当地法律法规。
 
 ---
 
-## 一、已实现的功能（一期）
+## 一、已实现的功能
 
 | 能力 | 说明 |
 | --- | --- |
 | 密码门禁 | PBKDF2-SHA256 哈希存储；HMAC 签名会话 Cookie（HttpOnly / SameSite=Lax）；登录失败限流（5 次锁定 5 分钟） |
-| 三种提取模式 | ① 自动识别 HTML 表格 ② CSS 选择器（列表 / 卡片） ③ 正文文章抽取 |
-| 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页，页间可设延时 |
-| 多种数据来源 | 网页 URL、粘贴 HTML、上传本地 `.html` 文件 |
-| 页面分析 | 抓取前先分析：页面标题、检测到的表格数量/行列/表头/预览、正文长度，点选表格即可采集 |
+| 智能识别（默认） | 自动选择 HTML 表格、重复列表 / 卡片或正文，自动生成条目选择器与字段；无需新手手填规则，低置信度时会提示核对 |
+| 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；可查看并修改智能识别出的规则 |
+| 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页；第一页识别后冻结规则，后续页复用，结构异常时保留已抓数据并停止 |
+| 图片文字识别 | 基于 RapidOCR + ONNX Runtime 的本地中文 OCR；支持 JPG / PNG / WebP 图片 URL 与本地上传，逐行输出文字、置信度和坐标 |
+| 多种数据来源 | 网页 URL、图片 URL、本地图片、粘贴 HTML、上传本地 `.html` 文件 |
+| 页面分析 | 可选步骤：查看智能识别结果、表格数量/行列/表头/预览与正文长度；不分析也可直接开始抓取 |
 | 结果预览 | 表格预览前 100 行，显示行数、列数、耗时、抓取页数、告警 |
 | 四种导出 | CSV（带 BOM，Excel 打开中文不乱码）、XLSX（带表头样式/冻结/筛选）、JSON、自包含 HTML 报告（含字段完整度统计） |
 | 历史任务 | SQLite 持久化，重启后仍可查看与重新导出、删除 |
 | SSRF 防护 | 仅 http/https；解析 DNS 后拦截内网/回环/链路本地/元数据地址；每次重定向都重新校验 |
 | robots.txt | 默认遵守，可在明确授权时手动忽略 |
-| 资源限制 | 响应体大小、超时、页数、行数、并发任务数、排队上限 |
+| 资源限制 | 响应体大小、超时、页数、行数、并发任务数、排队上限；图片最大 10 MB、2000 万像素并校验真实格式 |
 | 可选浏览器渲染 | 安装 Playwright 后可抓 JS 动态渲染页面 |
 | 可选正文增强 | 安装 trafilatura 后正文抽取质量更高（未安装时使用内置启发式算法） |
 | 部署方式 | Docker Compose 一键部署，或本地 Python 虚拟环境运行 |
@@ -40,7 +42,9 @@
 | [Scrapy](https://github.com/scrapy/scrapy) | ~65.4k | 分布式爬虫框架 | 适合百万级抓取；一期单机采集无需引入其工程复杂度 |
 | [crawlee-python](https://github.com/apify/crawlee-python) | ~9.7k | Python 爬虫 + 浏览器自动化 | 参考其请求队列/重试设计 |
 | [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为可选依赖**，未安装时使用内置正文算法 |
-| [autoscraper](https://github.com/alirezamika/autoscraper) | ~8.1k | 给样例自动学习规则 | 二期做"点选式选择器"的参考 |
+| [autoscraper](https://github.com/alirezamika/autoscraper) | ~8.1k | 给样例自动学习规则 | 参考其自动学习思路；当前零输入场景使用确定性的 DOM 结构识别 |
+| [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | ~92.7k | 完整 OCR 与表格结构识别平台 | 能力全面但运行时较重，本次未引入完整 Paddle 运行时 |
+| [RapidOCR](https://github.com/RapidAI/RapidOCR) | ~8.5k | 轻量本地 ONNX OCR | **已接入**，适合中文图片、本地隐私处理与 PyCharm 部署 |
 
 > 说明：星星数以 GitHub 官方 API 实测为准；数字会随时间变化。
 
@@ -56,17 +60,19 @@ crawler-app/
 │   ├── auth.py          # 密码哈希、签名会话、登录限流
 │   ├── security.py      # URL 规范化与 SSRF 防护
 │   ├── fetcher.py       # httpx 抓取 + robots + 重定向校验 + Playwright
-│   ├── extractor.py     # 表格 / CSS / 正文三种解析
+│   ├── extractor.py     # 智能表格 / 重复列表 / 正文识别与手动规则
+│   ├── ocr.py           # RapidOCR 懒加载、图片校验、视觉分行
 │   ├── exporter.py      # CSV / XLSX / JSON / HTML 报告
 │   ├── storage.py       # SQLite 任务存储
 │   ├── jobs.py          # 任务参数校验与执行编排
 │   └── set_password.py  # 生成 PBKDF2 密码哈希
 ├── static/              # 登录页 + 控制台（原生 JS，无 CDN 依赖）
-├── tests/               # 40 个自动化测试
+├── tests/               # 自动化测试（解析、任务、OCR、安全、导出、API）
 ├── data/                # 运行时生成：SQLite、密钥、初始密码（已 gitignore）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── requirements-ocr.txt # 可选本地 OCR 依赖
 ├── .env.example
 └── run.sh
 ```
@@ -138,7 +144,12 @@ python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 
 1. PyCharm → `File → Open`，选择 `crawler-app` 文件夹。
 2. `Settings → Project → Python Interpreter → Add Interpreter → Virtualenv`，新建 `.venv`（Python 3.11/3.12）。
-3. 打开底部 Terminal（已自动激活虚拟环境），执行 `pip install -r requirements.txt`。
+3. 打开底部 Terminal（已自动激活虚拟环境），执行：
+   ```powershell
+   python -m pip install -r requirements.txt
+   python -m pip install -r requirements-ocr.txt
+   ```
+   第二条用于图片中文 OCR；如果暂时不用图片识别，可以跳过。
 4. 在项目根目录新建 `.env` 文件（或复制 `.env.example`），写入：
    ```
    APP_PASSWORD=你的密码
@@ -169,7 +180,15 @@ Docker 中启用需要在 Dockerfile 增加（镜像会增大约 400MB）：
 RUN pip install playwright && playwright install --with-deps chromium
 ```
 
-**2）更好的正文抽取**
+**2）本地中文图片 OCR**
+
+```powershell
+python -m pip install -r requirements-ocr.txt
+```
+
+OCR 使用 RapidOCR + ONNX Runtime，在本机 CPU 上运行，图片不上传到云端。首次初始化识别引擎可能较慢；识别大量统计表时请逐张提交，避免同时运行过多任务。
+
+**3）更好的正文抽取**
 
 ```bash
 pip install trafilatura
@@ -181,17 +200,17 @@ pip install trafilatura
 
 登录后左侧是任务配置，中间是结果，右侧是历史。
 
-1. **表格采集**：粘贴页面 URL → 点「分析页面结构」→ 在检测结果里点选表格 → 「开始抓取」。
-   例：`https://www.w3schools.com/html/html_tables.asp`
-2. **列表/卡片采集**：提取方式选「CSS 选择器」。
-   例：`https://quotes.toscrape.com/`
-   - 条目选择器：`div.quote`
-   - 字段：`语录` → `.text`；`作者` → `.author`；`链接` → `a`，属性 `href`
-3. **正文采集**：选「正文文章」，输出标题、作者、日期、摘要、来源、正文一行。
-4. **分页采集**：URL 写 `https://example.com/list?page={page}`，页数 5，间隔 1.5 秒。
-5. **本地文件**：来源切「粘贴 / 上传 HTML」，选文件后点分析/抓取，全程不联网。
+1. **最常用的网页采集（无需设置字段）**：保持「网页 / 图片链接」→ 粘贴 URL → 直接点「开始抓取」。系统会优先识别数据表，其次识别重复列表 / 卡片并自动生成字段，最后回退正文。
+   例：`https://quotes.toscrape.com/` 可自动得到 10 条语录及作者、链接、标签等字段。
+2. **识别图片 URL 中的文字**：把 `.jpg`、`.png`、`.webp` 图片地址当作普通链接粘贴，保持智能识别，点击「开始抓取」，系统会自动切换 OCR。
+3. **国家统计局 2024 年鉴图片表示例**：输入
+   `https://www.stats.gov.cn/sj/ndsj/2024/html/C02-01.jpg`，点击「开始抓取」。年鉴首页是框架目录，系统不会自动遍历整站；请先打开具体统计表图片，再提交其图片 URL。
+4. **上传本地图片**：来源选择「本地图片识别」→ 选择 JPG / PNG / WebP → 点击「开始识别」。OCR 输出页码、行号、文字、置信度和文字框坐标，可直接导出 Excel / CSV。
+5. **分页采集**：展开「高级设置」，URL 写 `https://example.com/list?page={page}`，页数 5，间隔 1.5 秒。多页会复用第一页规则，避免每页字段漂移。
+6. **手动修改规则**：可先点「分析页面结构」查看智能识别结果，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
+7. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
 
-结果区可导出 CSV / Excel / JSON / HTML 报告；历史任务随时回看与重新导出。
+结果区可导出 CSV / Excel / JSON / HTML 报告；历史任务随时回看与重新导出。图片 OCR 当前按“视觉行”提取文字，**不会自动还原复杂统计表的行列关系、合并单元格或表头层级**；低置信度文字请对照原图复核。
 
 ---
 
@@ -219,6 +238,8 @@ pip install trafilatura
   - 需要登录才能看到的数据不在支持范围；
   - 使用无本地 DNS 的纯代理网络时，SSRF 预解析会失败（这是安全校验的代价）；
   - 处理 `rowspan` 等复杂表格时按行展开，可能出现空单元格；
+  - OCR 对模糊、倾斜、低分辨率图片可能误识别；复杂表格仅按视觉行输出，不等于完整表格结构识别；
+  - 图片限制为 JPG / PNG / WebP、10 MB、2000 万像素；SVG、动图和伪造图片会被拒绝；
   - DNS 重绑定是高级 SSRF 手法，建议配合出口网络策略防护。
 
 **合规提醒**：采集前确认目标站点条款与 `robots.txt`；涉及个人信息时遵守《个人信息保护法》/GDPR；尊重版权与数据库权利；控制频率，避免影响对方服务。
@@ -254,6 +275,8 @@ python -m pytest -q          # 预期：40 passed
 | 15 | SSRF 防护 | 尝试 `http://127.0.0.1/`、`http://169.254.169.254/` | 被拒绝，提示"内网/保留地址" |
 | 16 | robots 遵守 | 目标 robots 禁止的路径 | 任务失败并提示 robots 规则 |
 | 17 | 粘贴 HTML | 上传本地 `.html` 文件后采集 | 无需联网即可得到数据 |
+| 18 | 一键智能识别 | 只输入 `https://quotes.toscrape.com/` 并开始 | 不填写选择器，自动得到 10 行卡片数据 |
+| 19 | 图片 OCR | 上传清晰中文图片或输入年鉴 JPG 地址 | 输出逐行文字与置信度，可导出 Excel / CSV |
 
 ---
 
@@ -266,6 +289,10 @@ python -m pytest -q          # 预期：40 passed
 **抓取返回 403 / 空数据**：多数是 JS 渲染或反爬。先在「页面渲染」选「浏览器渲染」并安装 Playwright；仍失败则说明站点有强风控，请勿强行绕过。
 
 **中文乱码**：抓取端会按响应头与 meta charset 自动解码（含 gb18030 兜底）；导出 CSV 带 BOM，用 Excel 直接双击打开即可。
+
+**提示未安装 OCR 依赖**：在 PyCharm 底部 Terminal 确认使用的是本项目解释器，然后执行 `python -m pip install -r requirements-ocr.txt`，重启 `start.py`。若第三方镜像提示找不到 RapidOCR 3.10+，改用官方源：`python -m pip install --index-url https://pypi.org/simple -r requirements-ocr.txt`。
+
+**识别图片后不是规范表格**：当前 OCR 输出的是逐行文字和坐标，不做复杂表格结构重建。可以导出 Excel 后二次整理；关键统计数据请对照原图和置信度复核。
 
 **数据会不会丢**：所有任务与结果都在 `data/jobs.db`（SQLite，WAL 模式）。备份该文件即可；Docker 方式已挂载 `./data`。
 

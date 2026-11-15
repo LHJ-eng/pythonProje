@@ -15,6 +15,8 @@ from .config import Settings
 from .security import InvalidURLError, validate_url
 
 MAX_REDIRECTS = 5
+MAX_IMAGE_BYTES = 10_000_000
+_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _META_CHARSET = re.compile(
     rb"""<meta[^>]+charset=["']?\s*([a-zA-Z0-9_\-]+)""", re.IGNORECASE
 )
@@ -35,6 +37,8 @@ class FetchResult:
     elapsed_ms: int
     via: str
     truncated: bool = False
+    kind: str = "html"
+    body: bytes = b""
 
 
 def _decode_body(body: bytes, content_type: str) -> str:
@@ -128,7 +132,7 @@ async def _read_limited(response: httpx.Response, max_bytes: int) -> bytes:
         total += len(chunk)
         if total > max_bytes:
             raise FetchError(
-                f"响应体超过 {max_bytes // 1000} KB 限制，已中止（可用 MAX_BYTES 调整）"
+                f"响应体超过 {max_bytes // 1000} KB 限制，已中止"
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -161,12 +165,24 @@ def _fetch_with_browser(url: str, settings: Settings) -> str:
         raise FetchError(f"浏览器渲染失败：{exc}") from exc
 
 
+def _is_supported_image(body: bytes, content_type: str) -> bool:
+    mime = content_type.split(";", 1)[0].strip().lower()
+    if mime in _IMAGE_CONTENT_TYPES:
+        return True
+    return (
+        body.startswith(b"\xff\xd8\xff")
+        or body.startswith(b"\x89PNG\r\n\x1a\n")
+        or (body.startswith(b"RIFF") and body[8:12] == b"WEBP")
+    )
+
+
 async def fetch_url(
     url: str,
     settings: Settings,
     *,
     browser: bool = False,
     ignore_robots: bool = False,
+    allow_image: bool = False,
 ) -> FetchResult:
     started = time.perf_counter()
     url = validate_url(url, allow_private=settings.allow_private_network)
@@ -179,22 +195,34 @@ async def fetch_url(
             )
         response, hops = await _get_with_redirects(client, url, settings)
         final_url = str(response.url)
-        try:
-            body = await _read_limited(response, settings.max_bytes)
-        finally:
-            await response.aclose()
         content_type = response.headers.get("content-type", "")
         status = response.status_code
-        html = _decode_body(body, content_type)
+        mime = content_type.split(";", 1)[0].strip().lower()
+        max_bytes = (
+            MAX_IMAGE_BYTES
+            if allow_image and mime in _IMAGE_CONTENT_TYPES
+            else settings.max_bytes
+        )
+        try:
+            body = await _read_limited(response, max_bytes)
+        finally:
+            await response.aclose()
 
-    if status >= 400 and not browser:
-        hint = "，该站点可能需要浏览器渲染" if status in (403, 429, 503) else ""
+    kind = "image" if allow_image and _is_supported_image(body, content_type) else "html"
+    if status >= 400 and (not browser or kind == "image"):
+        hint = "，该站点可能需要浏览器渲染" if status in (403, 429, 503) and kind == "html" else ""
         raise FetchError(f"目标返回 HTTP {status}{hint}")
-    if "html" not in content_type.lower() and content_type:
-        raise FetchError(f"目标不是 HTML 页面（Content-Type: {content_type}）")
+    if kind == "image":
+        if len(body) > MAX_IMAGE_BYTES:
+            raise FetchError("图片超过 10 MB 限制，已中止")
+        html = ""
+    else:
+        html = _decode_body(body, content_type)
+        if "html" not in content_type.lower() and content_type:
+            raise FetchError(f"目标不是 HTML 页面（Content-Type: {content_type}）")
 
     via = "http"
-    if browser:
+    if browser and kind == "html":
         html = await asyncio.to_thread(_fetch_with_browser, final_url, settings)
         via = "browser"
 
@@ -205,4 +233,6 @@ async def fetch_url(
         content_type=content_type,
         elapsed_ms=int((time.perf_counter() - started) * 1000),
         via=via,
+        kind=kind,
+        body=body if kind == "image" else b"",
     )

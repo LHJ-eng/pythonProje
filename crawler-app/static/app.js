@@ -7,6 +7,9 @@ let source = 'url';
 let currentJobId = null;
 let pollTimer = null;
 let selectedTableIndex = null;
+let imageData = '';
+let imageName = '';
+let lastAutoRule = null;
 
 const noticeBox = $('notice');
 const analysisBox = $('analysis');
@@ -70,7 +73,20 @@ function switchSource(next) {
   });
   $('pane-url').hidden = next !== 'url';
   $('pane-html').hidden = next !== 'html';
-  $('analyze').disabled = false;
+  $('pane-image').hidden = next !== 'image';
+  $('advanced').hidden = next === 'image';
+  $('analyze').disabled = next === 'image';
+  $('run').textContent = next === 'image' ? '开始识别' : '开始抓取';
+  $('primary-hint').textContent = next === 'image'
+    ? '选择一张图片后点击「开始识别」，无需配置字段；中文 OCR 在本地运行。'
+    : '无需填写选择器。智能模式会自动识别表格、重复列表、正文；图片链接会自动进行文字识别。';
+  if (next !== 'url') $('pages').value = '1';
+  if (next === 'image') {
+    $('mode').value = 'auto';
+    switchMode('auto');
+  }
+  analysisBox.hidden = true;
+  notice('');
 }
 
 function switchMode(mode) {
@@ -121,6 +137,8 @@ function currentRequest({ forAnalyze = false } = {}) {
     url: $('url').value.trim(),
     html: $('html').value,
     base_url: $('base-url').value.trim(),
+    image_data: imageData,
+    image_name: imageName,
     mode: $('mode').value,
     browser: $('browser').value === '1',
     pages: Number($('pages').value) || 1,
@@ -139,19 +157,52 @@ function currentRequest({ forAnalyze = false } = {}) {
 /* ------------------------------------------------------------------ 分析 */
 function renderAnalysis(data) {
   analysisBox.hidden = false;
+  lastAutoRule = data.auto || null;
+  const sizeText = data.image ? `图片约 ${Math.ceil(data.chars / 1000)} KB` : `HTML ${data.chars} 字符`;
   $('analysis-summary').textContent =
-    `${data.title || '（无标题）'} · 链接 ${data.links} 个 · HTML ${data.chars} 字符` +
+    `${data.title || '（无标题）'} · 链接 ${data.links} 个 · ${sizeText}` +
     (data.url ? ` · ${data.url}` : '');
 
   const tablesBox = $('analysis-tables');
   tablesBox.textContent = '';
   selectedTableIndex = null;
 
+  if (lastAutoRule && lastAutoRule.mode) {
+    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', ocr: '图片文字识别' };
+    const card = node('div', 'auto-card');
+    const score = lastAutoRule.score === undefined ? '' : ` · 置信度 ${Math.round(lastAutoRule.score * 100)}%`;
+    card.appendChild(node('b', '', `智能识别：${labels[lastAutoRule.mode] || lastAutoRule.mode}${score}`));
+    card.appendChild(node('div', 'preview-line', lastAutoRule.reason || '已自动确定提取方式'));
+    if (lastAutoRule.columns && lastAutoRule.columns.length) {
+      card.appendChild(node('div', 'preview-line', `字段：${lastAutoRule.columns.join(' | ')}`));
+    }
+    if (['table', 'css', 'article'].includes(lastAutoRule.mode)) {
+      const edit = node('button', 'ghost small', '在高级设置中查看 / 修改规则');
+      edit.type = 'button';
+      edit.addEventListener('click', () => {
+        $('advanced').open = true;
+        $('mode').value = lastAutoRule.mode;
+        if (lastAutoRule.mode === 'table') {
+          $('table-index').value = String(lastAutoRule.table_index ?? '');
+          $('first-row-header').checked = Boolean(lastAutoRule.first_row_header);
+        }
+        if (lastAutoRule.mode === 'css') {
+          $('item-selector').value = lastAutoRule.item_selector || '';
+          $('fields').textContent = '';
+          (lastAutoRule.fields || []).forEach((field) => addField(field.name, field.selector, field.attr));
+        }
+        switchMode(lastAutoRule.mode);
+      });
+      card.appendChild(edit);
+    }
+    tablesBox.appendChild(card);
+  } else if (lastAutoRule && lastAutoRule.error) {
+    tablesBox.appendChild(node('p', 'notice error', lastAutoRule.error));
+  }
+
   if (data.tables.length) {
-    tablesBox.appendChild(node('h3', '', `检测到 ${data.tables.length} 个表格（点击选择）`));
-    let best = data.tables[0];
+    tablesBox.appendChild(node('h3', '', `手动选择表格（共 ${data.tables.length} 个）`));
     data.tables.forEach((table) => {
-      if (table.rows * table.cols > best.rows * best.cols) best = table;
       const card = node('div', 'table-card');
       card.appendChild(node('b', '', `表格 #${table.index} · ${table.rows} 行 × ${table.cols} 列`));
       card.appendChild(node('div', 'preview-line', table.headers.join(' | ').slice(0, 160)));
@@ -163,31 +214,27 @@ function renderAnalysis(data) {
         document.querySelectorAll('.table-card').forEach((item) => item.classList.remove('active'));
         card.classList.add('active');
         selectedTableIndex = table.index;
+        $('advanced').open = true;
         $('table-index').value = String(table.index);
         $('mode').value = 'table';
         switchMode('table');
       });
-      card.dataset.index = String(table.index);
       tablesBox.appendChild(card);
     });
-    const cards = tablesBox.querySelectorAll('.table-card');
-    const target = Array.from(cards).find((card) => Number(card.dataset.index) === best.index);
-    if (target) target.click();
-  } else {
-    tablesBox.appendChild(node('p', 'hint', '未检测到 HTML 表格。可改用 CSS 选择器或正文模式。'));
+  } else if (!data.image) {
+    tablesBox.appendChild(node('p', 'hint', '未检测到 HTML 表格；仍可直接尝试智能抓取。'));
   }
 
   const articleBox = $('analysis-article');
   articleBox.textContent = '';
   if (data.article.length > 0) {
     articleBox.hidden = false;
-    articleBox.appendChild(
-      node('div', 'article-head', `正文约 ${data.article.length} 字符`)
-    );
+    articleBox.appendChild(node('div', 'article-head', `正文约 ${data.article.length} 字符`));
     articleBox.appendChild(node('div', 'article-text', data.article.preview + '…'));
-    const useArticle = node('button', 'ghost small', '使用正文模式');
+    const useArticle = node('button', 'ghost small', '使用手动正文模式');
     useArticle.type = 'button';
     useArticle.addEventListener('click', () => {
+      $('advanced').open = true;
       $('mode').value = 'article';
       switchMode('article');
       notice('已切换到正文模式，点击「开始抓取」即可。', 'ok');
@@ -210,7 +257,7 @@ async function analyzePage() {
   } catch (error) {
     notice(error.message, 'error');
   } finally {
-    button.disabled = false;
+    button.disabled = source === 'image';
     button.textContent = '分析页面结构';
   }
 }
@@ -227,12 +274,18 @@ function renderJob(job) {
   if (job.status === 'error') {
     metaLine.appendChild(node('span', 'warn', `错误：${job.error || '未知错误'}`));
   } else if (job.status === 'done') {
+    const viaLabels = { browser: '浏览器渲染', http: '静态请求', html: '本地 HTML', local_image: '本地图片 OCR' };
+    const detection = meta.auto_detection || {};
+    const ocr = meta.ocr || {};
+    const averageConfidence = ocr.average_confidence ?? ocr.avg_confidence;
     const parts = [
       `${job.total_rows} 行 × ${job.columns.length} 列`,
-      meta.via === 'browser' ? '浏览器渲染' : '静态请求',
+      viaLabels[meta.via] || '本地处理',
+      detection.reason || '',
+      averageConfidence !== undefined ? `OCR 平均置信度 ${(Number(averageConfidence) * 100).toFixed(1)}%` : '',
       meta.pages_fetched ? `${meta.pages_fetched} 页` : '',
       meta.elapsed_ms ? `${(meta.elapsed_ms / 1000).toFixed(1)} 秒` : '',
-      job.url || '',
+      job.url || meta.image_name || '',
     ].filter(Boolean);
     metaLine.appendChild(node('span', '', parts.join(' · ')));
     (meta.warnings || []).forEach((warning) => {
@@ -321,7 +374,10 @@ async function pollJob(jobId, startedAt = Date.now()) {
     renderJob(job);
     if (job.status === 'done' || job.status === 'error') {
       loadHistory();
-      if (job.status === 'done') notice(`抓取完成：${job.total_rows} 行数据。`, 'ok');
+      if (job.status === 'done') {
+        const action = (job.meta || {}).resolved_mode === 'ocr' ? '识别' : '抓取';
+        notice(`${action}完成：${job.total_rows} 行数据。`, 'ok');
+      }
       return;
     }
   } catch (error) {
@@ -343,6 +399,7 @@ async function startJob() {
     const request = currentRequest();
     if (request.source === 'url' && !request.url) throw new Error('请填写网页 URL');
     if (request.source === 'html' && request.html.trim().length < 20) throw new Error('请粘贴或上传 HTML 内容');
+    if (request.source === 'image' && !request.image_data) throw new Error('请先选择需要识别的图片');
     const data = await api('/api/jobs', { method: 'POST', body: request });
     currentJobId = data.id;
     if (pollTimer) clearTimeout(pollTimer);
@@ -357,7 +414,7 @@ async function startJob() {
     notice(error.message, 'error');
   } finally {
     button.disabled = false;
-    button.textContent = '开始抓取';
+    button.textContent = source === 'image' ? '开始识别' : '开始抓取';
   }
 }
 
@@ -374,7 +431,8 @@ async function loadHistory() {
     data.jobs.forEach((job) => {
       const item = node('div', 'history-item');
       if (job.id === currentJobId) item.classList.add('active');
-      item.appendChild(node('div', 'url', job.url || '本地 HTML 数据'));
+      const sourceLabel = job.source_type === 'image' ? '本地图片识别' : '本地 HTML 数据';
+      item.appendChild(node('div', 'url', job.url || sourceLabel));
       const sub = node('div', 'sub');
       const state = node('span', '', `${statusLabel(job.status)} · ${job.total_rows} 行 · ${fmtTime(job.created_at)}`);
       const del = node('button', 'del', '删除');
@@ -463,10 +521,39 @@ async function boot() {
     };
     reader.readAsText(file, 'utf-8');
   });
+  $('image-file').addEventListener('change', (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    imageData = '';
+    imageName = file.name;
+    $('image-preview').hidden = true;
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (file.size > 10_000_000) {
+      event.target.value = '';
+      notice('图片超过 10 MB，请压缩后重试。', 'error');
+      return;
+    }
+    if (file.type && !allowedTypes.includes(file.type)) {
+      event.target.value = '';
+      notice('仅支持 JPG、PNG、WebP 图片。', 'error');
+      return;
+    }
+    $('image-name').textContent = `正在读取：${file.name}`;
+    const reader = new FileReader();
+    reader.onerror = () => notice('图片读取失败，请重新选择。', 'error');
+    reader.onload = () => {
+      imageData = String(reader.result || '');
+      $('image-name').textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KB`;
+      $('image-preview').src = imageData;
+      $('image-preview').hidden = false;
+      notice('图片已载入，点击「开始识别」即可。', 'ok');
+    };
+    reader.readAsDataURL(file);
+  });
 
   addField('标题', 'h2', 'text');
   addField('链接', 'a', 'href');
-  switchMode('table');
+  switchMode('auto');
   loadHistory();
 }
 
