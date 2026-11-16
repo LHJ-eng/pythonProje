@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Optional local OCR (Chinese image text). Web scraping works without it.
+rapidocr>=3.10,<4
+onnxruntime>=1.17
+pillow>=10

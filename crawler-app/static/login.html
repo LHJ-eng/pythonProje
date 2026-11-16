@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · DataHarvester</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<div class="login-card">
+  <div class="brand login-brand">
+    <span class="logo">DH</span>
+    <div>
+      <strong>DataHarvester</strong>
+      <small>自托管网页数据采集系统</small>
+    </div>
+  </div>
+  <form id="login-form" autocomplete="off">
+    <label class="label" for="password">访问密码</label>
+    <input id="password" type="password" required autofocus
+           placeholder="请输入 APP_PASSWORD" autocomplete="current-password">
+    <button class="primary block" id="login-btn" type="submit">进入控制台</button>
+  </form>
+  <p id="login-error" class="notice error" hidden></p>
+  <p class="muted small">
+    首次部署未设置密码时，初始密码保存在服务器
+    <code>data/initial_password.txt</code>。
+  </p>
+</div>
+<script src="/static/login.js"></script>
+</body>
+</html>
