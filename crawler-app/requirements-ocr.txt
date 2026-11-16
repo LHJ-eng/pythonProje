@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# 本地中文图片 OCR（可选）：不安装时网页抓取功能不受影响
+rapidocr>=3.10,<4
+onnxruntime>=1.17
+pillow>=10

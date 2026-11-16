@@ -188,6 +188,13 @@ python -m pip install -r requirements-ocr.txt
 
 OCR 使用 RapidOCR + ONNX Runtime，在本机 CPU 上运行，图片不上传到云端。首次初始化识别引擎可能较慢；识别大量统计表时请逐张提交，避免同时运行过多任务。
 
+Docker 方式如需 OCR，在 `Dockerfile` 中先复制并安装 OCR 依赖（镜像会明显增大）：
+
+```dockerfile
+COPY requirements-ocr.txt ./
+RUN pip install --no-cache-dir -r requirements-ocr.txt
+```
+
 **3）更好的正文抽取**
 
 ```bash
@@ -248,12 +255,12 @@ pip install trafilatura
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**40 个自动化测试全部通过，并用本地站点完成三种模式与四种导出的端到端验证**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**67 个自动化测试全部通过，并用本地站点完成三种网页模式与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：40 passed
+python -m pytest -q          # 预期：67 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |
