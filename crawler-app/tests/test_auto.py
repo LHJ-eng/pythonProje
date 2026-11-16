@@ -6,6 +6,7 @@ from app.extractor import (
     ExtractionError,
     _dedupe_repeated,
     analyze_page,
+    extract_article,
     extract_auto,
     extract_feed,
     extract_structured,
@@ -224,3 +225,27 @@ def test_auto_list_detects_items_by_shared_class():
     extraction, rule = extract_auto(html, "https://example.com/", browser_rendered=True)
     assert rule["mode"] == "css"
     assert len(extraction.rows) == 6
+
+
+def test_article_uses_readability_when_trafilatura_weak():
+    """正文抽取在 trafilatura 结果不理想时，readability 能作为并行候选被选中。"""
+    html = """
+    <html><head><title>站点标题 - 导航</title></head>
+    <body>
+    <nav><a>首页</a><a>分类</a><a>关于</a><a>联系</a></nav>
+    <aside>广告位 推荐阅读 热门排行</aside>
+    <article>
+    <h1>真正的文章标题</h1>
+    <p>这是文章的第一段正文，包含足够多的文字内容来满足长度阈值，让抽取器认为这是一篇有效的文章。</p>
+    <p>第二段继续补充正文内容，确保整体正文长度足够长，能够被 readability 算法正确识别为主内容。</p>
+    <p>第三段正文用于进一步增加文章的文本密度，避免被误判为导航或广告区域。</p>
+    <p>第四段正文继续写作，让整个 article 区域的文本量明显大于页面其他区域。</p>
+    </article>
+    <footer>版权所有 备案号 联系我们</footer>
+    </body></html>
+    """
+    extraction = extract_article(html, "https://blog.example.com/post")
+    row = extraction.rows[0]
+    assert row[0] == "真正的文章标题"
+    assert "第一段正文" in row[-1]
+    assert "广告位" not in row[-1]

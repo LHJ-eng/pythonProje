@@ -18,6 +18,7 @@
 | 框架页自动跟进 | 遇到 `frameset` 老式目录页（如统计年鉴）时自动尝试 main / content / left 等子框架，选择真正含数据的框架继续提取 |
 | 自动浏览器回退 | 静态抓取结果为空、且本机已安装 Playwright 时，自动用浏览器重新渲染一次；前端会提示"已自动切换浏览器渲染" |
 | 字段智能清洗 | 自动去掉父子节点重复文本、折叠"标题 标题 标题"式重复、剔除常量列、按语义命名（标题 / 日期 / 链接），一个条目只保留一个链接或图片字段 |
+| 主内容清洗 | 内置 readability-lxml（Mozilla Readability 移植），先剥离导航 / 侧栏 / 广告再识别列表与正文，避免周围元素干扰 |
 | 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；可查看并修改智能识别出的规则 |
 | 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页；第一页识别后冻结规则，后续页复用，结构异常时保留已抓数据并停止 |
 | 图片文字识别 | 基于 RapidOCR + ONNX Runtime 的本地中文 OCR；支持 JPG / PNG / WebP 图片 URL 与本地上传，逐行输出文字、置信度和坐标 |
@@ -47,6 +48,7 @@
 | [Scrapy](https://github.com/scrapy/scrapy) | ~65.4k | 分布式爬虫框架 | 适合百万级抓取；一期单机采集无需引入其工程复杂度 |
 | [crawlee-python](https://github.com/apify/crawlee-python) | ~9.7k | Python 爬虫 + 浏览器自动化 | 参考其请求队列/重试设计 |
 | [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为基础依赖**，正文与元数据抽取优先使用，失败时回退内置算法 |
+| [python-readability](https://github.com/buriy/python-readability) | ~1.6k | Mozilla Readability 的 Python 移植 | **已接入为基础依赖**，用于剥离导航/侧栏/广告后再做列表与正文识别；正文抽取与 trafilatura 并行打分择优 |
 | [autoscraper](https://github.com/alirezamika/autoscraper) | ~8.1k | 给样例自动学习规则 | 参考其自动学习思路；当前零输入场景使用确定性的 DOM 结构识别 |
 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | ~92.7k | 完整 OCR 与表格结构识别平台 | 能力全面但运行时较重，本次未引入完整 Paddle 运行时 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | ~8.5k | 轻量本地 ONNX OCR | **已接入**，适合中文图片、本地隐私处理与 PyCharm 部署 |
@@ -261,12 +263,12 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**81 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**82 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：81 passed
+python -m pytest -q          # 预期：82 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |

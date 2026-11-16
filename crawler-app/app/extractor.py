@@ -291,13 +291,90 @@ def _fallback_article(soup: BeautifulSoup, url: str) -> tuple[list[str], list[li
     ]
 
 
+def _readability_extract(html: str, url: str) -> tuple[str, str] | None:
+    """用 readability-lxml（Mozilla Readability 的 Python 移植）抽取主内容正文与标题。
+
+    返回 (title, body_text)，失败返回 None。readability 擅长剥离导航、侧栏、广告，
+    保留真正的正文容器。
+    """
+    try:
+        from readability import Document
+    except ImportError:
+        return None
+    try:
+        doc = Document(html, url=url)
+        title = _collapse(doc.title() or "")
+        summary_html = doc.summary() or ""
+        if not summary_html:
+            return None
+        soup = make_soup(summary_html)
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        # 优先用正文里的第一个标题标签（h1/h2）作为文章标题，避免取到站点 <title>
+        heading = soup.find(["h1", "h2"])
+        if heading:
+            heading_title = _collapse(heading.get_text(" ", strip=True))
+            if heading_title:
+                title = heading_title
+                heading.decompose()
+        text = _collapse(soup.get_text("\n", strip=True))
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if len(text.strip()) < 80:
+            return None
+        return title, text[:200_000]
+    except Exception:
+        return None
+
+
+def _main_content_html(html: str, url: str = "") -> str:
+    """返回 readability 清洗后的主内容 HTML（剥离 nav/aside/广告）。
+
+    用于在主内容容器范围内重新做列表识别，避免页面导航/推荐位干扰。
+    """
+    try:
+        from readability import Document
+    except ImportError:
+        return html
+    try:
+        summary = Document(html, url=url).summary() or ""
+        return summary if summary.strip() else html
+    except Exception:
+        return html
+
+
+def _article_quality_score(text: str) -> float:
+    """正文质量打分：越长越好，但短句/链接行过多会扣分。"""
+    if not text:
+        return 0.0
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return 0.0
+    link_lines = sum(
+        1 for line in lines if line.startswith(("http://", "https://", "www."))
+    )
+    short_lines = sum(1 for line in lines if len(line) < 8)
+    density_bonus = 1.0 - min(0.6, link_lines / len(lines))
+    short_penalty = 1.0 - min(0.5, short_lines / max(len(lines), 1))
+    return len(text) * density_bonus * short_penalty
+
+
+def _build_article_extraction(
+    title: str, author: str, date: str, summary: str, url: str, body: str
+) -> Extraction:
+    return Extraction(
+        columns=["标题", "作者", "日期", "摘要", "来源URL", "正文"],
+        rows=[[title, author, date, summary, url, body[:200_000]]],
+    )
+
+
 def extract_article(html: str, url: str, *, browser_rendered: bool = False) -> Extraction:
     soup = make_soup(html)
+    candidates: list[tuple[float, Extraction]] = []
 
-    try:  # 可选依赖：装了 trafilatura 时优先使用，正文质量更好
+    # 候选 1：trafilatura
+    try:
         import trafilatura
 
-        # 浏览器渲染页偏向列表数据，正文抽取用 precision 模式减少导航/侧栏噪声
         text = trafilatura.extract(
             html,
             url=url,
@@ -316,12 +393,24 @@ def extract_article(html: str, url: str, *, browser_rendered: bool = False) -> E
             author = (getattr(meta, "author", "") or "") if meta else ""
             date = (getattr(meta, "date", "") or "") if meta else ""
             summary = (getattr(meta, "description", "") or "") if meta else ""
-            return Extraction(
-                columns=["标题", "作者", "日期", "摘要", "来源URL", "正文"],
-                rows=[[title, author, date, summary, url, text[:200_000]]],
-            )
+            extraction = _build_article_extraction(title, author, date, summary, url, text)
+            candidates.append((_article_quality_score(text), extraction))
     except Exception:
         pass
+
+    # 候选 2：readability-lxml（剥离导航/侧栏后取正文）
+    readability_result = _readability_extract(html, url)
+    if readability_result:
+        title, body = readability_result
+        if not title:
+            title = _meta(soup, "og:title") or (
+                _collapse(soup.title.get_text(" ", strip=True)) if soup.title else ""
+            )
+        extraction = _build_article_extraction(title, "", "", "", url, body)
+        candidates.append((_article_quality_score(body), extraction))
+
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
 
     columns, rows = _fallback_article(soup, url)
     if not rows[0][-1].strip():
@@ -1224,6 +1313,29 @@ def extract_auto(
         list_candidate = None
     if list_candidate:
         candidates.append(list_candidate)
+
+    # 用 readability 剥离导航/侧栏/广告后，在主内容容器里再做一次列表识别。
+    # 很多页面的列表被周围导航项干扰（导航也是结构相似的重复块），清洗后能更准。
+    cleaned_list_candidate = None
+    cleaned_html = _main_content_html(html, base_url)
+    if cleaned_html and cleaned_html != html and len(cleaned_html) < len(html):
+        try:
+            cleaned_list_candidate = _best_auto_list(
+                cleaned_html, base_url, relaxed=browser_rendered
+            )
+        except ExtractionError:
+            cleaned_list_candidate = None
+        if cleaned_list_candidate:
+            # 清洗后的候选只有在分数更高或条目更纯时才采用，避免 readability 误删内容
+            list_score = list_candidate[1]["score"] if list_candidate else 0.0
+            if (
+                cleaned_list_candidate[1]["score"] > list_score
+                or (list_candidate and len(cleaned_list_candidate[0].rows) > len(list_candidate[0].rows))
+            ):
+                cleaned_list_candidate[1]["reason"] = (
+                    cleaned_list_candidate[1]["reason"] + "（已剥离页面导航/侧栏）"
+                )
+                candidates.append(cleaned_list_candidate)
 
     structured_candidate = None
     try:
