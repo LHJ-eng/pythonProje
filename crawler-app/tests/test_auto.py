@@ -191,3 +191,36 @@ def test_frame_sources_resolves_absolute_urls():
 def test_dedupe_repeated_collapses_responsive_duplicates():
     assert _dedupe_repeated("新闻标题 新闻标题 新闻标题") == "新闻标题"
     assert _dedupe_repeated("正常文本 没有重复") == "正常文本 没有重复"
+
+
+def test_browser_rendered_prefers_list_over_article():
+    """渲染页即便含大量正文文本，也应优先识别为列表数据，避免正文把卡片吞掉。"""
+    cards = "".join(
+        f'<div class="item"><h3>商品{i}</h3><span class="price">¥{i}</span>'
+        f'<a href="/p/{i}">详情</a></div>'
+        for i in range(1, 13)
+    )
+    paras = "".join(f"<p>第{i}段正文文字，较长，会让正文抽取得到高分。</p>" for i in range(25))
+    html = f"<body><main>{cards}</main><article>{paras}</article></body>"
+
+    extraction, rule = extract_auto(html, "https://shop.example.com/", browser_rendered=True)
+    assert rule["mode"] == "css"
+    assert len(extraction.rows) == 12
+    assert extraction.columns[0] == "标题"
+
+
+def test_auto_list_detects_items_by_shared_class():
+    """不同标签名但共享 class 的条目（SPA 常见）也能被识别为列表。"""
+    html = """
+    <div class="list">
+      <div class="card"><h3>商品 A</h3><a href="/1">详情</a></div>
+      <article class="card"><h3>商品 B</h3><a href="/2">详情</a></article>
+      <section class="card"><h3>商品 C</h3><a href="/3">详情</a></section>
+      <div class="card"><h3>商品 D</h3><a href="/4">详情</a></div>
+      <div class="card"><h3>商品 E</h3><a href="/5">详情</a></div>
+      <div class="card"><h3>商品 F</h3><a href="/6">详情</a></div>
+    </div>
+    """
+    extraction, rule = extract_auto(html, "https://example.com/", browser_rendered=True)
+    assert rule["mode"] == "css"
+    assert len(extraction.rows) == 6

@@ -163,7 +163,26 @@ def _fetch_with_browser(url: str, settings: Settings) -> str:
                     wait_until="domcontentloaded",
                     timeout=int(settings.fetch_timeout * 1000),
                 )
-                page.wait_for_timeout(1200)
+                # 等待网络空闲（最多 3 秒），覆盖异步接口返回
+                try:
+                    page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+                # 滚动到底部触发懒加载 / 虚拟列表渲染，再回到顶部
+                try:
+                    page.evaluate(
+                        "async () => { "
+                        "for (let i = 0; i < 6; i++) { "
+                        "window.scrollTo(0, document.body.scrollHeight * (i + 1) / 6); "
+                        "await new Promise(r => setTimeout(r, 300)); "
+                        "} "
+                        "window.scrollTo(0, 0); "
+                        "}"
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
                 return page.content()
             finally:
                 browser.close()

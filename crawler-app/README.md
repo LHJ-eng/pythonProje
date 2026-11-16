@@ -181,6 +181,8 @@ python -m playwright install chromium
 # Linux 缺系统库时： python -m playwright install --with-deps chromium
 ```
 
+启用后智能模式会自动处理：等待网络空闲、滚动页面触发懒加载，再提取数据。对于渲染后的列表/卡片页，系统会**优先识别列表数据**而非把整页当成正文，避免抓到一堆导航和页脚文字。
+
 Docker 中启用需要在 Dockerfile 增加（镜像会增大约 400MB）：
 
 ```dockerfile
@@ -259,12 +261,12 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**79 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**81 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：79 passed
+python -m pytest -q          # 预期：81 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |

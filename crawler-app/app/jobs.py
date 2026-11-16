@@ -286,6 +286,7 @@ class JobRunner:
                             request,
                             page=page,
                             auto_rule=auto_rule,
+                            browser_rendered=result.via == "browser",
                         )
                     except (ExtractionError, ValueError):
                         if not (
@@ -316,6 +317,7 @@ class JobRunner:
                             result.url,
                             request,
                             page=page,
+                            browser_rendered=True,
                         )
                 if first is not None and extraction.columns != first.columns:
                     raise ExtractionError("识别列与第一页不一致，为避免数据错位已停止")
@@ -382,7 +384,11 @@ class JobRunner:
                 fallback = (framed, src)
             try:
                 extraction, detected = self._extract_one(
-                    framed.html, framed.url, request, page=1
+                    framed.html,
+                    framed.url,
+                    request,
+                    page=1,
+                    browser_rendered=framed.via == "browser",
                 )
             except (ExtractionError, ValueError):
                 continue
@@ -412,9 +418,12 @@ class JobRunner:
         *,
         page: int = 1,
         auto_rule: dict | None = None,
+        browser_rendered: bool = False,
     ) -> tuple[Extraction, dict | None]:
         if request.mode == "auto":
-            extraction, detected = extract_auto(html, base_url, rule=auto_rule)
+            extraction, detected = extract_auto(
+                html, base_url, rule=auto_rule, browser_rendered=browser_rendered
+            )
             if page > 1:
                 extraction.warnings.append("后续页复用第一页的智能识别规则")
             return extraction, detected

@@ -291,18 +291,20 @@ def _fallback_article(soup: BeautifulSoup, url: str) -> tuple[list[str], list[li
     ]
 
 
-def extract_article(html: str, url: str) -> Extraction:
+def extract_article(html: str, url: str, *, browser_rendered: bool = False) -> Extraction:
     soup = make_soup(html)
 
     try:  # 可选依赖：装了 trafilatura 时优先使用，正文质量更好
         import trafilatura
 
+        # 浏览器渲染页偏向列表数据，正文抽取用 precision 模式减少导航/侧栏噪声
         text = trafilatura.extract(
             html,
             url=url,
             include_comments=False,
             include_tables=False,
-            favor_recall=True,
+            favor_recall=not browser_rendered,
+            deduplicate=True,
         )
         if text and len(text.strip()) >= 80:
             meta = trafilatura.extract_metadata(html, default_url=url)
@@ -1054,10 +1056,13 @@ def extract_feed(xml_text: str, base_url: str) -> tuple[Extraction, dict]:
 
 
 
-def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
+def _best_auto_list(
+    html: str, base_url: str, *, relaxed: bool = False
+) -> tuple[Extraction, dict] | None:
     soup = make_soup(html)
     best = None
-    parents = soup.find_all(True)[:400]
+    sim_threshold = 0.45 if relaxed else 0.55
+    parents = soup.find_all(True)[:800]
     for parent in parents:
         if parent.name in {"table", "tr", "tbody", "thead", "tfoot"}:
             continue
@@ -1071,9 +1076,14 @@ def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
             continue
         groups: dict[str, list] = {}
         for child in children:
-            groups.setdefault(child.name, []).append(child)
-        for tag_name, items in groups.items():
-            if len(items) < 3 or len(items) / len(children) < 0.5:
+            # 同时按标签名和共享 class 分组，覆盖 SPA 中同类卡片用不同标签包裹的情况
+            groups.setdefault(f"tag:{child.name}", []).append(child)
+            for cls in child.get("class", []):
+                cls = str(cls)
+                if cls and _safe_css_ident(cls):
+                    groups.setdefault(f"class:{cls}", []).append(child)
+        for key, items in groups.items():
+            if len(items) < 3 or len(items) / len(children) < 0.4:
                 continue
             if any(_auto_blocked(item) for item in items):
                 continue
@@ -1089,16 +1099,22 @@ def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
             )
             similarities = [_jaccard(medoid, signature) for signature in signatures]
             median_similarity = statistics.median(similarities)
-            if median_similarity < 0.55:
+            if median_similarity < sim_threshold:
                 continue
-            if sum(value >= 0.5 for value in similarities) / len(similarities) < 0.7:
+            min_sim_ratio = 0.6 if relaxed else 0.7
+            if sum(value >= 0.5 for value in similarities) / len(similarities) < min_sim_ratio:
                 continue
 
             common_classes = set(str(v) for v in items[0].get("class", []))
             for item in items[1:]:
                 common_classes.intersection_update(str(v) for v in item.get("class", []))
             common_classes = {value for value in common_classes if _safe_css_ident(value)}
-            item_part = tag_name + "".join(f".{value}" for value in sorted(common_classes))
+            if key.startswith("class:"):
+                # 按共享 class 分组时，直接用该 class 作为条目选择器（不依赖标签名）
+                item_part = f".{key.split(':', 1)[1]}"
+            else:
+                tag_name = key.split(":", 1)[1]
+                item_part = tag_name + "".join(f".{value}" for value in sorted(common_classes))
             selector = f"{_auto_parent_selector(parent, soup)} > {item_part}"
             try:
                 matched = soup.select(selector)
@@ -1157,7 +1173,7 @@ def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
 
 
 def extract_auto(
-    html: str, base_url: str, rule: dict | None = None
+    html: str, base_url: str, rule: dict | None = None, *, browser_rendered: bool = False
 ) -> tuple[Extraction, dict]:
     """智能识别表格、重复列表或正文；后续页可复用第一页规则。"""
     if rule:
@@ -1192,12 +1208,18 @@ def extract_auto(
             "这是框架目录页，请打开具体框架页面；若统计表是图片，请直接输入图片 URL"
         )
 
+    # 列表页信号：链接较多（含文字）时，大概率是列表/目录，不是单篇正文
+    text_links = sum(
+        1 for a in soup.find_all("a") if _collapse(a.get_text(" ", strip=True))
+    )
+    is_list_like = text_links >= 15
+
     candidates: list[tuple[Extraction, dict]] = []
     table_candidate = _best_auto_table(html)
     if table_candidate:
         candidates.append(table_candidate)
     try:
-        list_candidate = _best_auto_list(html, base_url)
+        list_candidate = _best_auto_list(html, base_url, relaxed=browser_rendered)
     except ExtractionError:
         list_candidate = None
     if list_candidate:
@@ -1214,7 +1236,7 @@ def extract_auto(
     article_candidate = None
     article_score = 0.0
     try:
-        article = extract_article(html, base_url)
+        article = extract_article(html, base_url, browser_rendered=browser_rendered)
         body = article.rows[0][-1] if article.rows else ""
         article_score = min(len(body) / 600, 1) * 0.8 + 0.2 * bool(article.rows[0][0])
         page_text = _collapse(soup.get_text(" ", strip=True))
@@ -1224,6 +1246,8 @@ def extract_auto(
         )
         if page_text and link_text / len(page_text) >= 0.5:
             article_score *= 0.6  # 链接目录页，不应被当成正文
+        if is_list_like:
+            article_score *= 0.5  # 明显的列表页，正文模式降权
         article_candidate = (article, {
             "mode": "article",
             "score": round(article_score, 3),
@@ -1234,8 +1258,19 @@ def extract_auto(
 
     best_structured = max(candidates, key=lambda item: item[1]["score"]) if candidates else None
     low_confidence = False
+    # 浏览器渲染后的页面通常是应用/列表页：只要列表/结构化/表格候选分数够，就优先于正文
     if best_structured and best_structured[1]["score"] >= 0.60:
         extraction, detected = best_structured
+    elif (
+        browser_rendered
+        and best_structured
+        and best_structured[1]["score"] >= 0.40
+        and (list_candidate or structured_candidate)
+    ):
+        # 渲染页：列表/结构化分数超过 0.4 即优先，避免正文把列表数据吞掉
+        extraction, detected = best_structured
+        if best_structured[1]["score"] < 0.55:
+            low_confidence = True
     elif article_candidate and article_score >= 0.55:
         extraction, detected = article_candidate
     elif best_structured and best_structured[1]["score"] >= 0.45:
