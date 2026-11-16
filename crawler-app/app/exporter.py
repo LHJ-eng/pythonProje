@@ -96,6 +96,30 @@ def to_xlsx(columns: list[str], rows: list[list[str]], meta: dict) -> bytes:
     return buffer.getvalue()
 
 
+def to_markdown(columns: list[str], rows: list[list[str]], meta: dict) -> bytes:
+    """Markdown 表格导出，便于直接粘贴到文档 / 笔记 / LLM 上下文。"""
+    columns, rows = _prepare(columns, rows)
+    source = str(meta.get("source_url") or meta.get("job_id") or "抓取结果")
+    created = str(meta.get("scraped_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def cell(value: str) -> str:
+        text = str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+        return text[:1000]
+
+    lines = [
+        f"# {source}",
+        "",
+        f"> 共 {len(rows)} 行 × {len(columns)} 列 · 生成时间 {created} · DataHarvester",
+        "",
+        "| " + " | ".join(cell(c) for c in columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(cell(v) for v in row) + " |")
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
 def to_html_report(
     columns: list[str], rows: list[list[str]], meta: dict, stats: list[dict]
 ) -> bytes:
@@ -160,4 +184,5 @@ EXPORTERS = {
         "xlsx",
     ),
     "html": ("text/html; charset=utf-8", "html"),
+    "md": ("text/markdown; charset=utf-8", "md"),
 }

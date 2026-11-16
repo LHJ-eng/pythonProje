@@ -94,6 +94,17 @@ def test_html_job_flow_and_exports(settings):
         assert xlsx_response.status_code == 200
         assert xlsx_response.content[:2] == b"PK"
 
+        md_response = client.get(f"/api/jobs/{job_id}/export?format=md")
+        assert md_response.status_code == 200
+        assert "| 名称 | 价格 | 库存 |" in md_response.text
+
+        metrics = client.get("/api/metrics")
+        assert metrics.status_code == 200
+        payload = metrics.json()
+        assert payload["cache"]["enabled"] is True
+        assert payload["jobs"]["total"] >= 1
+        assert payload["version"] == "1.1.0"
+
         assert client.get(f"/api/jobs/{job_id}/export?format=docx").status_code == 400
 
         history = client.get("/api/jobs").json()["jobs"]

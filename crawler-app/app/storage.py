@@ -141,3 +141,18 @@ def delete_job(db_path: Path, job_id: str) -> bool:
     with _LOCK, _connect(db_path) as conn:
         cursor = conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
     return cursor.rowcount > 0
+
+
+def job_stats(db_path: Path) -> dict:
+    """任务与数据量统计，供指标接口使用。"""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS count, COALESCE(SUM(total_rows), 0) AS rows "
+            "FROM jobs GROUP BY status"
+        ).fetchall()
+    by_status = {row["status"]: int(row["count"]) for row in rows}
+    return {
+        "total": sum(by_status.values()),
+        "by_status": by_status,
+        "total_rows": sum(int(row["rows"]) for row in rows),
+    }

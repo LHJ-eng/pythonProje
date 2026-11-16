@@ -1,4 +1,4 @@
-"""页面解析：自动表格、CSS 选择器、正文抽取三种模式。"""
+"""页面解析：自动表格、CSS / XPath 选择器、正文抽取三种模式。"""
 
 from __future__ import annotations
 
@@ -173,12 +173,26 @@ def extract_css(
     base_url: str,
     item_selector: str,
     fields: list[dict],
+    *,
+    item_selector_type: str = "css",
 ) -> Extraction:
     item_selector = (item_selector or "").strip()
     if not item_selector:
         raise ExtractionError("请填写条目选择器（例如 div.product）")
     if not fields:
         raise ExtractionError("至少需要一个字段映射")
+    selector_kind = (item_selector_type or "css").strip().lower()
+    if selector_kind == "xpath" or any(
+        (spec.get("selector_type") or "css").strip().lower() == "xpath"
+        for spec in fields
+    ):
+        return _extract_xpath(
+            html,
+            base_url,
+            item_selector,
+            fields,
+            item_selector_type=selector_kind,
+        )
     soup = make_soup(html)
     try:
         items = soup.select(item_selector)
@@ -198,28 +212,156 @@ def extract_css(
         for spec in fields:
             selector = (spec.get("selector") or "").strip()
             attr = (spec.get("attr") or "text").strip().lower()
-            value = ""
             try:
-                if not selector:
-                    node = item
-                elif selector.startswith("@"):
-                    value = item.get(selector[1:], "") or ""
-                    node = None
-                else:
-                    node = item.select_one(selector)
-                    if node is None and _matches(item, selector):
-                        node = item
-                if node is not None and not value:
-                    if attr == "text":
-                        value = _collapse(node.get_text(" ", strip=True))
-                    elif attr == "html":
-                        value = str(node)
-                    else:
-                        value = node.get(attr, "") or ""
-                        if attr in {"href", "src", "poster"} and value:
-                            value = urljoin(base_url, value)
+                value = _css_field_value(item, selector, attr, base_url)
             except Exception as exc:
                 warnings.append(f"字段 {spec.get('name')} 解析失败：{exc}")
+                value = ""
+            row.append(_dedupe_repeated(_collapse(value)))
+        if any(row):
+            rows.append(row)
+    if not rows:
+        raise ExtractionError("匹配到条目，但所有字段都是空的，请检查字段选择器")
+    return Extraction(columns=columns, rows=rows, warnings=warnings[:10])
+
+
+def _css_field_value(item, selector: str, attr: str, base_url: str) -> str:
+    """按 CSS 选择器从条目中取值（支持 @属性、text、html 与常用链接属性）。"""
+    value = ""
+    node = None
+    if not selector:
+        node = item
+    elif selector.startswith("@"):
+        getter = getattr(item, "get", None)
+        value = (getter(selector[1:], "") if getter else "") or ""
+    else:
+        node = item.select_one(selector)
+        if node is None and item is not None and _matches(item, selector):
+            node = item
+    if node is not None and not value:
+        if attr == "text":
+            value = _collapse(node.get_text(" ", strip=True))
+        elif attr == "html":
+            value = str(node)
+        else:
+            value = node.get(attr, "") or ""
+            if attr in {"href", "src", "poster"} and value:
+                value = urljoin(base_url, value)
+    return str(value or "")
+
+
+def _to_lxml(node):
+    try:
+        import lxml.html
+
+        return lxml.html.fromstring(str(node))
+    except Exception:
+        return None
+
+
+def _to_soup(node) -> BeautifulSoup:
+    try:
+        import lxml.html
+
+        return make_soup(
+            lxml.html.tostring(node, encoding="unicode", method="html")
+        )
+    except Exception:
+        return make_soup("")
+
+
+def _xpath_nodes(root, expression: str) -> list:
+    try:
+        return root.xpath(expression)
+    except Exception as exc:
+        raise ExtractionError(f"XPath 表达式语法错误：{exc}") from exc
+
+
+def _xpath_text(node) -> str:
+    try:
+        return _collapse(" ".join(str(part) for part in node.itertext()))
+    except Exception:
+        return ""
+
+
+def _xpath_value(nodes: list, attr: str, base_url: str) -> str:
+    node = nodes[0] if nodes else None
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return _collapse(node)
+    if attr == "text":
+        return _xpath_text(node)
+    if attr == "html":
+        try:
+            import lxml.html
+
+            return lxml.html.tostring(node, encoding="unicode", method="html")
+        except Exception:
+            return ""
+    value = node.get(attr, "") or ""
+    if attr in {"href", "src", "poster"} and value:
+        value = urljoin(base_url, value)
+    return str(value or "")
+
+
+def _extract_xpath(
+    html: str,
+    base_url: str,
+    item_selector: str,
+    fields: list[dict],
+    *,
+    item_selector_type: str = "xpath",
+) -> Extraction:
+    """XPath 模式：条目与字段都可使用 XPath，字段仍可回退到 CSS。"""
+    using_css_items = (item_selector_type or "xpath").strip().lower() == "css"
+    warnings: list[str] = []
+    if using_css_items:
+        soup = make_soup(html)
+        try:
+            items = list(soup.select(item_selector))
+        except Exception as exc:
+            raise ExtractionError(f"条目选择器语法错误：{exc}") from exc
+    else:
+        try:
+            import lxml.html
+
+            root = lxml.html.document_fromstring(html)
+        except Exception as exc:
+            raise ExtractionError(f"HTML 解析失败：{exc}") from exc
+        items = [node for node in _xpath_nodes(root, item_selector) if hasattr(node, "itertext")]
+    if not items:
+        raise ExtractionError(
+            f"未匹配到任何条目（选择器：{item_selector}）。"
+            "可先点「分析页面」查看页面结构，或检查是否为 JS 动态渲染。"
+        )
+
+    columns = _unique_columns([f.get("name") or f"字段{i + 1}" for i, f in enumerate(fields)])
+    rows: list[list[str]] = []
+    for item in items:
+        row: list[str] = []
+        css_item = item if using_css_items else None
+        for spec in fields:
+            selector = (spec.get("selector") or "").strip()
+            attr = (spec.get("attr") or "text").strip().lower()
+            default_kind = "css" if using_css_items else "xpath"
+            kind = (spec.get("selector_type") or default_kind).strip().lower()
+            value = ""
+            try:
+                if kind == "xpath":
+                    element = item if not using_css_items else _to_lxml(item)
+                    if element is not None:
+                        nodes = (
+                            _xpath_nodes(element, selector) if selector else [element]
+                        )
+                        value = _xpath_value(nodes, attr, base_url)
+                else:
+                    if css_item is None:
+                        css_item = _to_soup(item)
+                    value = _css_field_value(css_item, selector, attr, base_url)
+            except Exception as exc:
+                warnings.append(f"字段 {spec.get('name')} 解析失败：{exc}")
+                value = ""
             row.append(_dedupe_repeated(_collapse(value)))
         if any(row):
             rows.append(row)
@@ -1256,6 +1398,7 @@ def _best_auto_list(
         "score": round(score, 3),
         "reason": f"检测到 {count} 个结构相似的重复条目",
         "item_selector": selector,
+        "item_selector_type": "css",
         "fields": fields,
         "similarity": round(similarity, 3),
     }
@@ -1279,6 +1422,7 @@ def extract_auto(
                 base_url,
                 str(rule.get("item_selector", "")),
                 list(rule.get("fields", [])),
+                item_selector_type=str(rule.get("item_selector_type", "css")),
             )
         elif mode == "article":
             extraction = extract_article(html, base_url)
@@ -1416,6 +1560,112 @@ def extract_auto(
     return extraction, detected
 
 
+def normalize_rule(rule: dict | None) -> dict | None:
+    """校验前端回传 / 历史复用的人工提取规则，防止非法结构进入执行环节。"""
+    if rule is None:
+        return None
+    if not isinstance(rule, dict):
+        raise ExtractionError("提取规则格式无效")
+    mode = str(rule.get("mode") or "").strip().lower()
+    if not mode:
+        return None
+    if mode not in {"table", "css", "article", "structured"}:
+        raise ExtractionError("提取规则 mode 无效")
+    normalized: dict = {"mode": mode}
+    if mode == "table":
+        index = rule.get("table_index")
+        try:
+            normalized["table_index"] = int(index) if index is not None else None
+        except (TypeError, ValueError):
+            normalized["table_index"] = None
+        normalized["first_row_header"] = bool(rule.get("first_row_header"))
+        return normalized
+    if mode == "css":
+        item_selector = str(rule.get("item_selector") or "").strip()
+        if not item_selector:
+            raise ExtractionError("CSS 规则缺少条目选择器")
+        if len(item_selector) > 500:
+            raise ExtractionError("条目选择器过长")
+        item_kind = str(rule.get("item_selector_type") or "css").strip().lower()
+        if item_kind not in {"css", "xpath"}:
+            item_kind = "css"
+        raw_fields = rule.get("fields")
+        if not isinstance(raw_fields, list) or not raw_fields:
+            raise ExtractionError("CSS 规则至少需要一个字段映射")
+        fields: list[dict] = []
+        for spec in raw_fields[:30]:
+            if not isinstance(spec, dict):
+                raise ExtractionError("字段映射格式无效")
+            name = str(spec.get("name") or "").strip()[:60]
+            if not name:
+                raise ExtractionError("字段名不能为空")
+            selector = str(spec.get("selector") or "").strip()[:500]
+            attr = (str(spec.get("attr") or "text").strip()[:30] or "text")
+            field_kind = str(spec.get("selector_type") or item_kind).strip().lower()
+            if field_kind not in {"css", "xpath"}:
+                field_kind = item_kind
+            fields.append(
+                {
+                    "name": name,
+                    "selector": selector,
+                    "attr": attr,
+                    "selector_type": field_kind,
+                }
+            )
+        normalized.update(
+            item_selector=item_selector,
+            item_selector_type=item_kind,
+            fields=fields,
+        )
+    return normalized
+
+
+def build_schema(
+    extraction: Extraction, detected: dict | None, *, source_url: str = ""
+) -> dict:
+    """输出可复用的提取 schema（列定义 + 选择器），便于保存、校验与再次执行。"""
+    detected = dict(detected or {})
+    mode = str(detected.get("mode") or "auto")
+    fields: list[dict] = []
+    if mode == "css" and isinstance(detected.get("fields"), list):
+        for spec in detected["fields"][:30]:
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("name") or "").strip()[:60]
+            if not name:
+                continue
+            fields.append(
+                {
+                    "name": name,
+                    "selector": str(spec.get("selector") or "")[:500],
+                    "attr": str(spec.get("attr") or "text")[:30],
+                    "selector_type": str(spec.get("selector_type") or "css")[:10],
+                }
+            )
+    if not fields:
+        fields = [
+            {
+                "name": column,
+                "selector": "",
+                "attr": "text",
+                "selector_type": "css",
+            }
+            for column in extraction.columns
+        ]
+    return {
+        "version": 1,
+        "source_url": source_url,
+        "mode": mode,
+        "item_selector": str(detected.get("item_selector") or ""),
+        "item_selector_type": str(detected.get("item_selector_type") or "css"),
+        "table_index": detected.get("table_index"),
+        "first_row_header": bool(detected.get("first_row_header")),
+        "fields": fields,
+        "columns": list(extraction.columns),
+        "score": detected.get("score"),
+    }
+
+
 def analyze_page(html: str, url: str) -> dict:
     """返回页面结构摘要，供前端选择表格 / 预览正文。"""
     soup = make_soup(html)
@@ -1429,8 +1679,10 @@ def analyze_page(html: str, url: str) -> dict:
         article_preview = ""
         article_len = 0
 
+    schema = None
     try:
         auto_extraction, auto_rule = extract_auto(html, url)
+        schema = build_schema(auto_extraction, auto_rule, source_url=url)
         auto_summary = {
             **auto_rule,
             "rows": len(auto_extraction.rows),
@@ -1451,6 +1703,7 @@ def analyze_page(html: str, url: str) -> dict:
         "title": title,
         "url": url,
         "auto": auto_summary,
+        "schema": schema,
         "tables": [
             {
                 "index": t.index,

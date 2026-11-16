@@ -91,7 +91,24 @@
           <label class="label" for="delay">请求间隔（秒）</label>
           <input id="delay" type="number" min="0" max="10" step="0.1" value="0.8">
         </div>
+        <div>
+          <label class="label" for="wait-for">等待选择器（可选）</label>
+          <input id="wait-for" type="text" spellcheck="false" placeholder="例如 .product-item">
+        </div>
+        <div>
+          <label class="label" for="cache-mode">缓存策略</label>
+          <select id="cache-mode">
+            <option value="enabled" selected>优先使用缓存（推荐）</option>
+            <option value="refresh">强制刷新并校验 ETag</option>
+            <option value="bypass">本次跳过缓存</option>
+          </select>
+        </div>
       </div>
+
+      <label class="check">
+        <input id="scan-full-page" type="checkbox" checked>
+        浏览器渲染时滚动整页，触发懒加载 / 虚拟列表
+      </label>
 
       <div id="table-options" class="option-block">
         <div class="grid2">
@@ -107,14 +124,52 @@
       </div>
 
       <div id="css-options" class="option-block" hidden>
-        <label class="label" for="item-selector">条目选择器</label>
-        <input id="item-selector" type="text" spellcheck="false"
-               placeholder="例如 div.product-item">
+        <div class="grid2">
+          <div>
+            <label class="label" for="item-selector">条目选择器</label>
+            <input id="item-selector" type="text" spellcheck="false"
+                   placeholder="例如 div.product-item">
+          </div>
+          <div>
+            <label class="label" for="item-selector-type">选择器类型</label>
+            <select id="item-selector-type">
+              <option value="css" selected>CSS</option>
+              <option value="xpath">XPath</option>
+            </select>
+          </div>
+        </div>
         <label class="label">字段映射</label>
         <div id="fields"></div>
         <button class="ghost small" id="add-field" type="button">+ 添加字段</button>
         <p class="hint">属性填 <code>text</code> 取文本；填 <code>href</code>、<code>src</code>
           取链接；填 <code>html</code> 取内部 HTML。字段选择器留空表示取条目自身。</p>
+      </div>
+
+      <div id="deep-options" class="option-block" hidden>
+        <label class="check">
+          <input id="deep" type="checkbox">
+          深度抓取（同域多页，自动发现链接与 sitemap）
+        </label>
+        <div class="grid2">
+          <div>
+            <label class="label" for="max-depth">最大深度</label>
+            <input id="max-depth" type="number" min="0" max="5" value="1">
+          </div>
+          <div>
+            <label class="label" for="max-links">最多页面数</label>
+            <input id="max-links" type="number" min="1" max="200" value="10">
+          </div>
+          <div>
+            <label class="label" for="include-pattern">包含链接正则（可选）</label>
+            <input id="include-pattern" type="text" spellcheck="false" placeholder="例如 /article/">
+          </div>
+          <div>
+            <label class="label" for="exclude-pattern">排除链接正则（可选）</label>
+            <input id="exclude-pattern" type="text" spellcheck="false" placeholder="例如 /login|/tag/">
+          </div>
+        </div>
+        <p class="hint">深度抓取仅支持「网页 URL + 智能识别」。每个页面复用首个页面的识别规则，
+          并在结果中新增「来源页面」列。仅抓取同域名页面。</p>
       </div>
 
       <label class="check">

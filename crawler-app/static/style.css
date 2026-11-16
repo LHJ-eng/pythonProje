@@ -208,10 +208,11 @@ button { font: inherit; cursor: pointer; }
 .article-preview button { margin-top: 8px; }
 
 .field-row {
-  display: grid; grid-template-columns: 1fr 1.35fr 78px 26px;
+  display: grid; grid-template-columns: 1fr 1.35fr 62px 70px 26px;
   gap: 6px; margin-top: 8px; align-items: center;
 }
-.field-row input { padding: 7px 9px; font-size: 12px; }
+.field-row input, .field-row select { padding: 7px 9px; font-size: 12px; }
+.field-row select { padding: 7px 4px; }
 .del-field {
   border: 1px solid var(--line); background: transparent; color: var(--muted);
   border-radius: 7px; height: 30px; line-height: 1; font-size: 15px;

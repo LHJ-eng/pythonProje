@@ -16,7 +16,15 @@ from pydantic import BaseModel, Field
 from . import storage
 from .auth import LoginRateLimiter, issue_session, read_session, verify_password
 from .config import COOKIE_NAME, Settings, load_settings
-from .exporter import EXPORTERS, column_stats, to_csv, to_html_report, to_json, to_xlsx
+from .exporter import (
+    EXPORTERS,
+    column_stats,
+    to_csv,
+    to_html_report,
+    to_json,
+    to_markdown,
+    to_xlsx,
+)
 from .extractor import ExtractionError, analyze_page, extract_feed, frame_sources
 from .fetcher import FetchError, fetch_url
 from .jobs import JobRequest, JobRunner, sanitize_params
@@ -37,6 +45,9 @@ class AnalyzeBody(BaseModel):
     base_url: str = Field(default="", max_length=2048)
     browser: bool = False
     ignore_robots: bool = False
+    wait_for: str = Field(default="", max_length=300)
+    scan_full_page: bool = True
+    cache_mode: Literal["enabled", "bypass", "refresh"] | None = None
 
 
 def _client_ip(request: Request) -> str:
@@ -92,7 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         print("请登录后在 .env 中设置 APP_PASSWORD，并删除初始密码文件。")
         print("=" * 64)
 
-    app = FastAPI(title="DataHarvester", version="1.0.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DataHarvester", version="1.1.0", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.limiter = LoginRateLimiter()
     app.state.runner = JobRunner(settings)
@@ -129,7 +140,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "1.0.0"}
+        return {"status": "ok", "version": "1.1.0"}
+
+    @app.get("/api/metrics")
+    async def metrics(session: dict = Depends(require_auth)):
+        cache_stats = settings.cache.stats() if settings.cache else {"enabled": False}
+        return {
+            "version": "1.1.0",
+            "jobs": storage.job_stats(settings.db_path),
+            "cache": cache_stats,
+            "settings": {
+                "cache_mode": settings.cache_mode,
+                "cache_ttl": settings.cache_ttl,
+                "max_retries": settings.max_retries,
+                "min_host_interval": settings.min_host_interval,
+                "deep_max_pages": settings.deep_max_pages,
+            },
+        }
 
     @app.get("/api/me")
     async def me(request: Request):
@@ -197,6 +224,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     browser=body.browser,
                     ignore_robots=body.ignore_robots,
                     allow_image=True,
+                    cache_mode=body.cache_mode,
+                    wait_for=body.wait_for or None,
+                    scan_full_page=body.scan_full_page,
                 )
                 if result.kind == "html" and "<frameset" in result.html.lower():
                     frames = frame_sources(result.html, result.url)
@@ -212,6 +242,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             browser=body.browser,
                             ignore_robots=body.ignore_robots,
                             allow_image=True,
+                            cache_mode=body.cache_mode,
+                            wait_for=body.wait_for or None,
+                            scan_full_page=body.scan_full_page,
                         )
                 if result.kind == "feed":
                     extraction, rule = extract_feed(result.html, result.url)
@@ -337,6 +370,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload = to_json(columns, rows, meta)
         elif fmt == "xlsx":
             payload = to_xlsx(columns, rows, meta)
+        elif fmt == "md":
+            payload = to_markdown(columns, rows, meta)
         else:
             payload = to_html_report(
                 columns, rows, meta, column_stats(columns, rows)

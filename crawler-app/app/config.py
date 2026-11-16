@@ -8,6 +8,8 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .cache import HttpCache
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 COOKIE_NAME = "dh_session"
 # PBKDF2 参数：迭代次数越高越安全，但登录会稍慢
@@ -58,6 +60,25 @@ class Settings:
     )
     initial_password: str | None = None
     robot_override_allowed: bool = True
+    # HTTP 缓存（TTL + ETag 条件请求）
+    cache_enabled: bool = True
+    cache_ttl: float = 900.0
+    cache_mode: str = "enabled"
+    cache_max_entries: int = 500
+    cache_max_bytes: int = 50_000_000
+    # 按主机限速与重试
+    min_host_interval: float = 0.5
+    host_jitter: float = 0.3
+    max_retries: int = 2
+    retry_backoff: float = 0.6
+    # 浏览器渲染
+    browser_block_resources: bool = True
+    browser_scroll_steps: int = 6
+    # 深度抓取上限
+    deep_max_pages: int = 50
+    cache: HttpCache | None = field(
+        init=False, default=None, repr=False, compare=False
+    )
     db_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -66,6 +87,16 @@ class Settings:
         self.db_path = self.data_dir / "jobs.db"
         if not self.user_agent.strip():
             self.user_agent = "DataHarvester/1.0"
+        mode = (self.cache_mode or "enabled").strip().lower()
+        self.cache_mode = mode if mode in {"enabled", "bypass", "refresh"} else "enabled"
+        if self.cache_enabled:
+            self.cache = HttpCache(
+                self.data_dir / "http_cache.db",
+                ttl=self.cache_ttl,
+                max_entries=self.cache_max_entries,
+                max_bytes=self.cache_max_bytes,
+            )
+
 
 
 def _load_dotenv(path: Path) -> None:
@@ -135,6 +166,18 @@ def load_settings() -> Settings:
         fetch_timeout=float(os.getenv("FETCH_TIMEOUT", "25")),
         max_pages=int(os.getenv("MAX_PAGES", "20")),
         max_rows=int(os.getenv("MAX_ROWS", "50000")),
+        cache_enabled=_env_bool("CACHE_ENABLED", True),
+        cache_ttl=float(os.getenv("CACHE_TTL", "900")),
+        cache_mode=os.getenv("CACHE_MODE", "enabled"),
+        cache_max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "500")),
+        cache_max_bytes=int(os.getenv("CACHE_MAX_BYTES", "50000000")),
+        min_host_interval=float(os.getenv("HOST_MIN_INTERVAL", "0.5")),
+        host_jitter=float(os.getenv("HOST_JITTER", "0.3")),
+        max_retries=int(os.getenv("MAX_RETRIES", "2")),
+        retry_backoff=float(os.getenv("RETRY_BACKOFF", "0.6")),
+        browser_block_resources=_env_bool("BROWSER_BLOCK_RESOURCES", True),
+        browser_scroll_steps=int(os.getenv("BROWSER_SCROLL_STEPS", "6")),
+        deep_max_pages=int(os.getenv("DEEP_MAX_PAGES", "50")),
         user_agent=os.getenv("USER_AGENT", "").strip()
         or Settings.__dataclass_fields__["user_agent"].default,
         initial_password=initial_password,

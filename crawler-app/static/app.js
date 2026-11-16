@@ -85,6 +85,7 @@ function switchSource(next) {
     $('mode').value = 'auto';
     switchMode('auto');
   }
+  updateDeepVisibility();
   analysisBox.hidden = true;
   notice('');
 }
@@ -92,9 +93,20 @@ function switchSource(next) {
 function switchMode(mode) {
   $('table-options').hidden = mode !== 'table';
   $('css-options').hidden = mode !== 'css';
+  updateDeepVisibility();
 }
 
-function addField(name = '', selector = '', attr = 'text') {
+function updateDeepVisibility() {
+  const enabled = source === 'url' && $('mode').value === 'auto';
+  $('deep-options').hidden = !enabled;
+  if (!enabled) {
+    $('deep').checked = false;
+    $('pages').disabled = false;
+  }
+  if ($('deep').checked) $('pages').disabled = true;
+}
+
+function addField(name = '', selector = '', attr = 'text', selectorType = 'css') {
   const row = node('div', 'field-row');
   const nameInput = node('input');
   nameInput.type = 'text';
@@ -106,6 +118,14 @@ function addField(name = '', selector = '', attr = 'text') {
   selectorInput.placeholder = '选择器（留空=条目自身）';
   selectorInput.value = selector;
 
+  const typeSelect = node('select');
+  ['css', 'xpath'].forEach((value) => {
+    const option = node('option', '', value.toUpperCase());
+    option.value = value;
+    typeSelect.appendChild(option);
+  });
+  typeSelect.value = selectorType === 'xpath' ? 'xpath' : 'css';
+
   const attrInput = node('input');
   attrInput.type = 'text';
   attrInput.placeholder = 'text / href';
@@ -116,16 +136,18 @@ function addField(name = '', selector = '', attr = 'text') {
   remove.title = '删除字段';
   remove.addEventListener('click', () => row.remove());
 
-  row.append(nameInput, selectorInput, attrInput, remove);
+  row.append(nameInput, selectorInput, typeSelect, attrInput, remove);
   $('fields').appendChild(row);
 }
 
 function collectFields() {
   return Array.from(document.querySelectorAll('#fields .field-row')).map((row) => {
     const inputs = row.querySelectorAll('input');
+    const select = row.querySelector('select');
     return {
       name: inputs[0].value.trim(),
       selector: inputs[1].value.trim(),
+      selector_type: select ? select.value : 'css',
       attr: inputs[2].value.trim() || 'text',
     };
   }).filter((field) => field.name);
@@ -146,11 +168,24 @@ function currentRequest({ forAnalyze = false } = {}) {
     ignore_robots: $('ignore-robots').checked,
     first_row_header: $('first-row-header').checked,
     item_selector: $('item-selector').value.trim(),
+    item_selector_type: $('item-selector-type').value,
     fields: collectFields(),
+    wait_for: $('wait-for').value.trim(),
+    scan_full_page: $('scan-full-page').checked,
+    cache_mode: $('cache-mode').value,
+    deep: $('deep').checked,
+    max_depth: Number($('max-depth').value) || 0,
+    max_links: Number($('max-links').value) || 10,
+    include_pattern: $('include-pattern').value.trim(),
+    exclude_pattern: $('exclude-pattern').value.trim(),
   };
   const tableIndex = $('table-index').value.trim();
   request.table_index = tableIndex === '' ? null : Number(tableIndex);
-  if (forAnalyze && request.url) request.url = request.url.replace('{page}', '1');
+  if (request.deep && request.pages > 1) request.pages = 1;
+  if (forAnalyze && request.url) {
+    request.url = request.url.replace('{page}', '1');
+    request.deep = false;
+  }
   return request;
 }
 
@@ -188,8 +223,11 @@ function renderAnalysis(data) {
         }
         if (lastAutoRule.mode === 'css') {
           $('item-selector').value = lastAutoRule.item_selector || '';
+          $('item-selector-type').value = lastAutoRule.item_selector_type === 'xpath' ? 'xpath' : 'css';
           $('fields').textContent = '';
-          (lastAutoRule.fields || []).forEach((field) => addField(field.name, field.selector, field.attr));
+          (lastAutoRule.fields || []).forEach((field) => addField(
+            field.name, field.selector, field.attr, field.selector_type || 'css'
+          ));
         }
         switchMode(lastAutoRule.mode);
       });
@@ -274,7 +312,14 @@ function renderJob(job) {
   if (job.status === 'error') {
     metaLine.appendChild(node('span', 'warn', `错误：${job.error || '未知错误'}`));
   } else if (job.status === 'done') {
-    const viaLabels = { browser: '浏览器渲染', http: '静态请求', html: '本地 HTML', local_image: '本地图片 OCR' };
+    const viaLabels = {
+      browser: '浏览器渲染',
+      http: '静态请求',
+      cache: '命中本地缓存',
+      'cache-revalidated': 'ETag 校验复用',
+      html: '本地 HTML',
+      local_image: '本地图片 OCR',
+    };
     const detection = meta.auto_detection || {};
     const ocr = meta.ocr || {};
     const averageConfidence = ocr.average_confidence ?? ocr.avg_confidence;
@@ -284,8 +329,9 @@ function renderJob(job) {
       detection.reason || '',
       averageConfidence !== undefined ? `OCR 平均置信度 ${(Number(averageConfidence) * 100).toFixed(1)}%` : '',
       meta.auto_browser ? '已自动切换浏览器渲染' : '',
+      meta.deep ? `深度抓取 ${meta.pages_fetched} 页${meta.truncated ? '（已截断）' : ''}` : '',
       meta.frame_url ? '已跟进框架页' : '',
-      meta.pages_fetched ? `${meta.pages_fetched} 页` : '',
+      meta.pages_fetched && !meta.deep ? `${meta.pages_fetched} 页` : '',
       meta.elapsed_ms ? `${(meta.elapsed_ms / 1000).toFixed(1)} 秒` : '',
       job.url || meta.image_name || '',
     ].filter(Boolean);
@@ -304,6 +350,7 @@ function renderJob(job) {
       ['csv', '导出 CSV'],
       ['xlsx', '导出 Excel'],
       ['json', '导出 JSON'],
+      ['md', '导出 Markdown'],
       ['html', 'HTML 报告'],
     ];
     formats.forEach(([format, label]) => {
@@ -501,6 +548,11 @@ async function boot() {
     button.addEventListener('click', () => switchSource(button.dataset.source));
   });
   $('mode').addEventListener('change', () => switchMode($('mode').value));
+  $('deep').addEventListener('change', () => {
+    const on = $('deep').checked;
+    $('pages').disabled = on;
+    if (on) $('pages').value = '1';
+  });
   $('add-field').addEventListener('click', () => addField());
   $('analyze').addEventListener('click', analyzePage);
   $('run').addEventListener('click', startJob);

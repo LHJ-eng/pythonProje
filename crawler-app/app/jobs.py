@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from datetime import datetime
 from typing import Literal
@@ -11,15 +13,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import storage
 from .config import Settings
+from .deep_crawl import crawl_deep
 from .extractor import (
     Extraction,
     ExtractionError,
+    build_schema,
     extract_article,
     extract_auto,
     extract_css,
     extract_feed,
     extract_table,
     frame_sources,
+    normalize_rule,
     parse_tables,
 )
 from .exporter import column_stats
@@ -40,8 +45,9 @@ def _playwright_available() -> bool:
 
 class FieldSpec(BaseModel):
     name: str = Field(min_length=1, max_length=60)
-    selector: str = Field(default="", max_length=300)
+    selector: str = Field(default="", max_length=500)
     attr: str = Field(default="text", max_length=30)
+    selector_type: Literal["css", "xpath"] = "css"
 
     @field_validator("name", "selector", "attr")
     @classmethod
@@ -62,9 +68,38 @@ class JobRequest(BaseModel):
     table_index: int | None = Field(default=None, ge=0, le=999)
     first_row_header: bool = False
     item_selector: str = Field(default="", max_length=500)
+    item_selector_type: Literal["css", "xpath"] = "css"
     fields: list[FieldSpec] = Field(default_factory=list, max_length=30)
     ignore_robots: bool = False
     delay: float = Field(default=0.8, ge=0, le=10)
+    # 深度抓取（同域 BFS）
+    deep: bool = False
+    max_depth: int = Field(default=1, ge=0, le=5)
+    max_links: int = Field(default=10, ge=1, le=200)
+    include_pattern: str = Field(default="", max_length=300)
+    exclude_pattern: str = Field(default="", max_length=300)
+    # 浏览器渲染增强
+    wait_for: str = Field(default="", max_length=300)
+    scan_full_page: bool = True
+    cache_mode: Literal["enabled", "bypass", "refresh"] | None = None
+    # 复用 / 导入的提取规则（由「分析页面」导出的 schema）
+    rule: dict | None = None
+
+    @field_validator("rule")
+    @classmethod
+    def _check_rule(cls, value: dict | None) -> dict | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("提取规则格式无效") from exc
+        if len(encoded) > 20_000:
+            raise ValueError("提取规则过大（上限 20 KB）")
+        try:
+            return normalize_rule(value)
+        except ExtractionError as exc:
+            raise ValueError(str(exc)) from exc
 
     @model_validator(mode="after")
     def _check(self) -> "JobRequest":
@@ -94,6 +129,22 @@ class JobRequest(BaseModel):
                 raise ValueError("CSS 模式至少需要一个字段映射")
         if self.mode == "article" and self.pages > 1:
             raise ValueError("正文模式仅支持单页")
+        if self.deep:
+            if self.source != "url":
+                raise ValueError("深度抓取仅支持网页 URL 来源")
+            if self.mode != "auto":
+                raise ValueError("深度抓取仅支持智能识别模式")
+            if self.pages > 1:
+                raise ValueError("深度抓取与分页不能同时使用")
+        for label, pattern in (
+            ("包含", self.include_pattern),
+            ("排除", self.exclude_pattern),
+        ):
+            if pattern.strip():
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError(f"{label}正则表达式无效：{exc}")
         return self
 
 
@@ -220,8 +271,11 @@ class JobRunner:
         if request.ignore_robots and not self.settings.robot_override_allowed:
             raise ValueError("当前部署已禁用「忽略 robots.txt」选项")
 
+        if request.deep:
+            return await self._deep_crawl(job_id, request)
+
         first: Extraction | None = None
-        auto_rule: dict | None = None
+        auto_rule: dict | None = request.rule if request.mode == "auto" else None
         source_kind: str | None = None
         all_rows: list[list[str]] = []
         pages_fetched = 0
@@ -240,6 +294,9 @@ class JobRunner:
                 browser=request.browser,
                 ignore_robots=request.ignore_robots,
                 allow_image=request.mode == "auto",
+                cache_mode=request.cache_mode,
+                wait_for=request.wait_for or None,
+                scan_full_page=request.scan_full_page,
             )
             pages_fetched += 1
             frame_url = None
@@ -307,6 +364,9 @@ class JobRunner:
                             browser=True,
                             ignore_robots=request.ignore_robots,
                             allow_image=False,
+                            cache_mode="bypass",
+                            wait_for=request.wait_for or None,
+                            scan_full_page=request.scan_full_page,
                         )
                         meta["auto_browser"] = True
                         meta["via"] = result.via
@@ -332,6 +392,9 @@ class JobRunner:
                 meta["resolved_mode"] = detected["mode"] if detected else request.mode
                 if detected:
                     meta["auto_detection"] = detected
+                    meta["schema"] = build_schema(
+                        extraction, detected, source_url=result.url
+                    )
                 if request.mode == "auto" and result.kind == "html":
                     auto_rule = detected
             if extraction is not first:
@@ -345,6 +408,108 @@ class JobRunner:
         first.rows = all_rows
         first.warnings.extend(warnings)
         return first, meta
+
+    async def _deep_crawl(
+        self, job_id: str, request: JobRequest
+    ) -> tuple[Extraction, dict]:
+        """同域 BFS 深度抓取：每个页面单独智能识别，最后合并为一张表。"""
+        db = self.settings.db_path
+        meta: dict = {
+            "source_url": request.url,
+            "via": "http",
+            "deep": True,
+            "pages_requested": request.max_links,
+            "pages_fetched": 0,
+        }
+        storage.update_job(db, job_id, message="正在发现同域链接…")
+        crawled = await crawl_deep(
+            request.url,
+            self.settings,
+            max_depth=request.max_depth,
+            max_pages=request.max_links,
+            include=request.include_pattern,
+            exclude=request.exclude_pattern,
+            browser=request.browser,
+            ignore_robots=request.ignore_robots,
+            use_sitemap=True,
+            delay=request.delay,
+            wait_for=request.wait_for or None,
+            scan_full_page=request.scan_full_page,
+        )
+        warnings: list[str] = list(crawled.errors[:10])
+        first: Extraction | None = None
+        auto_rule: dict | None = request.rule if request.mode == "auto" else None
+        columns: list[str] = []
+        all_rows: list[list[str]] = []
+        fetched = 0
+        fetch_ms = 0
+        for index, page in enumerate(crawled.pages, start=1):
+            result = page.result
+            if result is None:
+                continue
+            fetch_ms += result.elapsed_ms
+            if result.kind != "html":
+                warnings.append(f"跳过非 HTML 页面：{page.url}")
+                continue
+            storage.update_job(
+                db,
+                job_id,
+                message=f"正在解析第 {index}/{len(crawled.pages)} 个页面…",
+            )
+            try:
+                extraction, detected = self._extract_one(
+                    result.html,
+                    result.url,
+                    request,
+                    page=index,
+                    auto_rule=auto_rule,
+                    browser_rendered=result.via == "browser",
+                )
+            except (ExtractionError, ValueError) as exc:
+                warnings.append(f"{page.url} 解析失败：{exc}")
+                continue
+            if first is None:
+                first = extraction
+                columns = list(extraction.columns)
+                if detected:
+                    meta["auto_detection"] = detected
+                    meta["resolved_mode"] = detected.get("mode", request.mode)
+                    meta["schema"] = build_schema(
+                        extraction, detected, source_url=result.url
+                    )
+                    if request.mode == "auto":
+                        auto_rule = detected
+            elif extraction.columns != columns:
+                warnings.append(f"{page.url} 列结构与首条不一致，已跳过")
+                continue
+            fetched += 1
+            for row in extraction.rows:
+                all_rows.append([*row, result.url])
+        if first is None or not all_rows:
+            detail = f"：{warnings[0]}" if warnings else ""
+            raise ExtractionError(f"深度抓取没有提取到有效数据{detail}")
+        output = Extraction(
+            columns=[*columns, "来源页面"],
+            rows=all_rows,
+            warnings=warnings[:20],
+        )
+        meta.update(
+            {
+                "pages_fetched": fetched,
+                "fetch_ms": fetch_ms,
+                "deep_pages": [
+                    {"url": page.url, "depth": page.depth, "error": page.error}
+                    for page in crawled.pages
+                ],
+                "discovered": crawled.discovered,
+                "sitemap_urls": crawled.sitemap_urls,
+                "truncated": crawled.truncated,
+                "warnings": warnings[:20],
+            }
+        )
+        if request.rule and request.mode == "auto":
+            meta["rule_reused"] = True
+        return output, meta
 
     async def _follow_frameset(self, result, request: JobRequest):
         """年鉴等 frameset 目录页：逐一尝试 main / contents 等框架，选出能提取数据的一帧。"""
@@ -373,6 +538,9 @@ class JobRunner:
                     browser=request.browser,
                     ignore_robots=request.ignore_robots,
                     allow_image=request.mode == "auto",
+                    cache_mode=request.cache_mode,
+                    wait_for=request.wait_for or None,
+                    scan_full_page=request.scan_full_page,
                 )
             except (FetchError, InvalidURLError):
                 continue
@@ -435,6 +603,7 @@ class JobRunner:
                 base_url,
                 request.item_selector,
                 [f.model_dump() for f in request.fields],
+                item_selector_type=request.item_selector_type,
             ), None
         tables = parse_tables(html)
         extraction = extract_table(

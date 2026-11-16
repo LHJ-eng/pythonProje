@@ -1,6 +1,8 @@
 # DataHarvester · 自托管网页数据采集系统
 
-输入一个网页链接，系统会自动识别页面里的**表格、列表卡片、正文文章**；输入图片链接或上传本地图片，则使用本地中文 OCR 提取文字。结果可在线预览并导出 **CSV / Excel / JSON / HTML 报告**。带**密码门禁**，可完全本地部署，网页数据和图片不会发送给第三方 AI 服务。
+输入一个网页链接，系统会自动识别页面里的**表格、列表卡片、正文文章**；输入图片链接或上传本地图片，则使用本地中文 OCR 提取文字。结果可在线预览并导出 **CSV / Excel / JSON / Markdown / HTML 报告**。带**密码门禁**，可完全本地部署，网页数据和图片不会发送给第三方 AI 服务。
+
+> 企业级能力：HTTP 缓存（ETag 条件请求）、同域限速与指数退避重试、同域深度抓取、XPath / CSS 双选择器、可复用的提取 Schema、缓存与任务指标接口。
 
 > 适合个人或小团队做公开数据采集、竞品价格监控、内容归档、报表取数。
 > 请只采集你有权访问的数据，并遵守目标站点服务条款、robots.txt 与当地法律法规。
@@ -19,18 +21,23 @@
 | 自动浏览器回退 | 静态抓取结果为空、且本机已安装 Playwright 时，自动用浏览器重新渲染一次；前端会提示"已自动切换浏览器渲染" |
 | 字段智能清洗 | 自动去掉父子节点重复文本、折叠"标题 标题 标题"式重复、剔除常量列、按语义命名（标题 / 日期 / 链接），一个条目只保留一个链接或图片字段 |
 | 主内容清洗 | 内置 readability-lxml（Mozilla Readability 移植），先剥离导航 / 侧栏 / 广告再识别列表与正文，避免周围元素干扰 |
-| 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；可查看并修改智能识别出的规则 |
+| 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；条目与字段均支持 **CSS / XPath** 混用，可查看并修改智能识别出的规则 |
+| 提取 Schema | 「分析页面」会同时输出可复用的提取 Schema（模式、条目选择器、字段、类型）；可通过请求参数 `rule` 直接复用，服务端会校验结构，避免无效规则进入执行环节 |
 | 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页；第一页识别后冻结规则，后续页复用，结构异常时保留已抓数据并停止 |
+| 深度抓取 | 参考 crawl4ai `DeepCrawlStrategy`：同域 BFS、最大深度 / 页面数、包含 / 排除正则、自动读取 `/sitemap.xml`；每个页面复用首个页面的识别规则，结果新增「来源页面」列 |
+| HTTP 缓存 | SQLite 持久化，TTL 内直接复用；过期后携带 ETag / Last-Modified 条件请求，304 时复用本地响应体；支持 `enabled / refresh / bypass` 三种策略与容量上限 |
+| 限速与重试 | 同域最小请求间隔 + 随机抖动；429 / 5xx / 网络错误按指数退避重试，自动遵循 `Retry-After` |
+| 运行指标 | `/api/metrics` 输出任务状态分布、总行数、缓存命中 / 未命中 / 304 复用次数与关键配置，便于接入监控 |
 | 图片文字识别 | 基于 RapidOCR + ONNX Runtime 的本地中文 OCR；支持 JPG / PNG / WebP 图片 URL 与本地上传，逐行输出文字、置信度和坐标 |
 | 多种数据来源 | 网页 URL、图片 URL、本地图片、粘贴 HTML、上传本地 `.html` 文件 |
 | 页面分析 | 可选步骤：查看智能识别结果、表格数量/行列/表头/预览与正文长度；不分析也可直接开始抓取 |
 | 结果预览 | 表格预览前 100 行，显示行数、列数、耗时、抓取页数、告警 |
-| 四种导出 | CSV（带 BOM，Excel 打开中文不乱码）、XLSX（带表头样式/冻结/筛选）、JSON、自包含 HTML 报告（含字段完整度统计） |
+| 五种导出 | CSV（带 BOM，Excel 打开中文不乱码）、XLSX（带表头样式/冻结/筛选）、JSON、Markdown 表格（便于粘贴到文档 / LLM）、自包含 HTML 报告（含字段完整度统计） |
 | 历史任务 | SQLite 持久化，重启后仍可查看与重新导出、删除 |
 | SSRF 防护 | 仅 http/https；解析 DNS 后拦截内网/回环/链路本地/元数据地址；每次重定向都重新校验 |
 | robots.txt | 默认遵守，可在明确授权时手动忽略 |
 | 资源限制 | 响应体大小、超时、页数、行数、并发任务数、排队上限；图片最大 10 MB、2000 万像素并校验真实格式 |
-| 浏览器渲染 | 安装 Playwright 后可抓 JS 动态渲染页面；智能模式下静态结果为空会自动回退一次 |
+| 浏览器渲染 | 安装 Playwright 后可抓 JS 动态渲染页面；默认拦截图片 / 字体 / 媒体资源加速，可等待指定选择器、滚动整页触发懒加载；智能模式下静态结果为空会自动回退一次 |
 | 正文增强 | 内置 trafilatura 作为基础依赖，正文与元数据抽取质量更高；解析失败时回退内置启发式算法 |
 | 部署方式 | Docker Compose 一键部署，或本地 Python 虚拟环境运行 |
 
@@ -44,7 +51,7 @@
 | --- | --- | --- | --- |
 | [firecrawl](https://github.com/firecrawl/firecrawl) | ~201.9k | AI 友好的爬取/抽取平台 | 未直接自托管：需要 Redis、多服务、API Key、Playwright，资源占用大。借鉴其"URL 进、结构化数据/报告出"的产品形态 |
 | [Scrapling](https://github.com/D4Vinci/Scrapling) | ~103.2k | 抗检测抓取框架（Playwright/自适应选择器） | 借鉴自适应选择器与隐身浏览思路；一期用标准 CSS 选择器保证可解释性 |
-| [crawl4ai](https://github.com/unclecode/crawl4ai) | ~87.4k | 开源 LLM 爬虫（Apache-2.0） | 借鉴本地部署与 Markdown/结构化输出；作为二期 LLM 抽取的候选 |
+| [crawl4ai](https://github.com/unclecode/crawl4ai) | ~87.4k | 开源 LLM 爬虫（Apache-2.0） | **本轮重点参考**：落地其 `cache_mode`（enabled / bypass / refresh）+ ETag 条件请求、`DeepCrawlStrategy` 同域 BFS、`RateLimiter` 同域限速、`wait_for` / 整页滚动、Markdown 输出；未直接引入其重型 Playwright 运行时 |
 | [Scrapy](https://github.com/scrapy/scrapy) | ~65.4k | 分布式爬虫框架 | 适合百万级抓取；一期单机采集无需引入其工程复杂度 |
 | [crawlee-python](https://github.com/apify/crawlee-python) | ~9.7k | Python 爬虫 + 浏览器自动化 | 参考其请求队列/重试设计 |
 | [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为基础依赖**，正文与元数据抽取优先使用，失败时回退内置算法 |
@@ -55,7 +62,7 @@
 
 > 说明：星星数以 GitHub 官方 API 实测为准；数字会随时间变化。
 
-**本轮参考 GitHub 落地的增强**：参考 crawl4ai / firecrawl 的"HTML→结构化数据"分层思路，新增 JSON-LD 与内嵌 JSON（`__NEXT_DATA__`、`__INITIAL_STATE__`）抽取；参考 Scrapling 的自适应与多策略重试，加入静态失败后的浏览器自动回退；参考 trafilatura 抽取正文；并补充 RSS/Atom 解析与 `frameset` 子框架自动跟进，覆盖老式目录站与订阅源。
+**本轮参考 GitHub 落地的增强**：参考 crawl4ai / firecrawl 的"HTML→结构化数据"分层思路，新增 JSON-LD 与内嵌 JSON（`__NEXT_DATA__`、`__INITIAL_STATE__`）抽取；参考 crawl4ai 的 `cache_mode` 落地 SQLite HTTP 缓存与 ETag 条件请求，参考 `DeepCrawlStrategy` 落地同域深度抓取，参考 `RateLimiter` 落地同域限速与 `Retry-After` 退避；参考 Scrapling 的自适应与多策略重试，加入静态失败后的浏览器自动回退与资源拦截；参考 trafilatura 抽取正文；并补充 RSS/Atom 解析、`frameset` 子框架自动跟进、XPath 选择器与 Markdown 输出。
 
 ---
 
@@ -68,12 +75,14 @@ crawler-app/
 │   ├── config.py        # 环境变量 / .env 配置、密码初始化
 │   ├── auth.py          # 密码哈希、签名会话、登录限流
 │   ├── security.py      # URL 规范化与 SSRF 防护
-│   ├── fetcher.py       # httpx 抓取 + robots + 重定向校验 + Playwright
-│   ├── extractor.py     # 智能表格 / 重复列表 / 正文识别与手动规则
+│   ├── fetcher.py       # httpx 抓取 + robots + 重定向校验 + 限速重试 + Playwright
+│   ├── cache.py         # SQLite HTTP 缓存（TTL / ETag 条件请求 / 容量上限）
+│   ├── deep_crawl.py    # 同域 BFS 深度抓取 + sitemap 发现
+│   ├── extractor.py     # 智能表格 / 重复列表 / 正文识别 + CSS / XPath + Schema
 │   ├── ocr.py           # RapidOCR 懒加载、图片校验、视觉分行
-│   ├── exporter.py      # CSV / XLSX / JSON / HTML 报告
-│   ├── storage.py       # SQLite 任务存储
-│   ├── jobs.py          # 任务参数校验与执行编排
+│   ├── exporter.py      # CSV / XLSX / JSON / Markdown / HTML 报告
+│   ├── storage.py       # SQLite 任务存储与统计
+│   ├── jobs.py          # 任务参数校验与执行编排（含深度抓取）
 │   └── set_password.py  # 生成 PBKDF2 密码哈希
 ├── static/              # 登录页 + 控制台（原生 JS，无 CDN 依赖）
 ├── tests/               # 自动化测试（解析、任务、OCR、安全、导出、API）
@@ -183,7 +192,7 @@ python -m playwright install chromium
 # Linux 缺系统库时： python -m playwright install --with-deps chromium
 ```
 
-启用后智能模式会自动处理：等待网络空闲、滚动页面触发懒加载，再提取数据。对于渲染后的列表/卡片页，系统会**优先识别列表数据**而非把整页当成正文，避免抓到一堆导航和页脚文字。
+启用后智能模式会自动处理：等待网络空闲、默认拦截图片 / 字体 / 媒体资源、滚动页面触发懒加载，再提取数据。对于渲染后的列表/卡片页，系统会**优先识别列表数据**而非把整页当成正文，避免抓到一堆导航和页脚文字。若目标数据在某个元素挂载后才出现，可在高级设置填写「等待选择器」（如 `.product-item`）。
 
 Docker 中启用需要在 Dockerfile 增加（镜像会增大约 400MB）：
 
@@ -208,6 +217,21 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 
 > 正文抽取库 trafilatura 已写进基础 `requirements.txt`，无需额外安装。
 
+**3）缓存、限速与深度抓取配置（`.env`）**
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CACHE_ENABLED` | `true` | 是否启用 HTTP 缓存 |
+| `CACHE_MODE` | `enabled` | 全局默认策略：`enabled` / `refresh` / `bypass`；单次任务可在界面覆盖 |
+| `CACHE_TTL` | `900` | 缓存有效期（秒） |
+| `CACHE_MAX_ENTRIES` / `CACHE_MAX_BYTES` | `500` / `50000000` | 缓存条数与字节上限，超出后从最旧开始淘汰 |
+| `HOST_MIN_INTERVAL` / `HOST_JITTER` | `0.5` / `0.3` | 同一域名最小请求间隔与随机抖动（秒） |
+| `MAX_RETRIES` / `RETRY_BACKOFF` | `2` / `0.6` | 重试次数与初始退避；自动遵循 `Retry-After` |
+| `BROWSER_BLOCK_RESOURCES` | `true` | 浏览器渲染时拦截图片 / 字体 / 媒体资源 |
+| `BROWSER_SCROLL_STEPS` | `6` | 整页滚动次数，用于触发懒加载 |
+| `DEEP_MAX_PAGES` | `50` | 深度抓取页数硬上限 |
+| `USER_AGENT` | `DataHarvester/1.0` | 建议改成带联系方式的自定义 UA |
+
 ---
 
 ## 五、使用说明（3 分钟上手）
@@ -222,10 +246,13 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
    `https://www.stats.gov.cn/sj/ndsj/2024/indexch.htm`，系统会自动跟进目录框架并提取 727 条章节条目；也可直接输入单张表图片 `https://www.stats.gov.cn/sj/ndsj/2024/html/C02-01.jpg` 做 OCR。
 5. **上传本地图片**：来源选择「本地图片识别」→ 选择 JPG / PNG / WebP → 点击「开始识别」。OCR 输出页码、行号、文字、置信度和文字框坐标，可直接导出 Excel / CSV。
 6. **分页采集**：展开「高级设置」，URL 写 `https://example.com/list?page={page}`，页数 5，间隔 1.5 秒。多页会复用第一页规则，避免每页字段漂移。
-7. **手动修改规则**：可先点「分析页面结构」查看智能识别结果，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
-8. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
+7. **深度抓取**：来源选「网页 URL」、保持智能识别，勾选「深度抓取」，设置最大深度 / 最多页面数，可选包含 / 排除正则（如包含 `/article/`、排除 `/login|/tag/`）。系统会从入口页做同域 BFS，并尝试读取 `/sitemap.xml`；结果新增「来源页面」列。
+8. **缓存策略**：高级设置中可选「优先使用缓存（默认）」「强制刷新并校验 ETag」「本次跳过缓存」。相同 URL 在 TTL 内不会重复请求目标站点；缓存库位于 `data/http_cache.db`，可随时删除重建。
+9. **XPath 采集**：手动选择器的「条目选择器类型」与每个字段都可独立选 CSS / XPath，例如条目 `//li[@class='row']`、字段 `.//a` + 属性 `href`。
+10. **手动修改 / 复用规则**：可先点「分析页面结构」查看智能识别结果与 Schema，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
+11. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
 
-结果区可导出 CSV / Excel / JSON / HTML 报告；历史任务随时回看与重新导出。图片 OCR 当前按“视觉行”提取文字，**不会自动还原复杂统计表的行列关系、合并单元格或表头层级**；低置信度文字请对照原图复核。
+结果区可导出 CSV / Excel / JSON / Markdown / HTML 报告；历史任务随时回看与重新导出。图片 OCR 当前按“视觉行”提取文字，**不会自动还原复杂统计表的行列关系、合并单元格或表头层级**；低置信度文字请对照原图复核。
 
 ---
 
@@ -238,7 +265,7 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 | CSRF | 所有写接口要求 `X-CSRF-Token`（与签名会话绑定） | — |
 | SSRF（借服务端访问内网） | 仅 http/https；解析所有 A/AAAA 记录并拒绝非公网 IP；拒绝 `file://`/`localhost`/`169.254.169.254`；每次重定向重新校验；URL 禁止携带账号密码 | 云主机建议同时用安全组/网络策略禁止访问元数据地址与内网段 |
 | 抓取越权 | 默认遵守 robots.txt；忽略需显式勾选 | 只抓公开、有权访问的数据；不要绕过登录墙/付费墙 |
-| 资源耗尽 | 响应体 5MB、超时 25s、单任务 20 页、5 万行、全局并发 2、排队上限 10 | 按机器配置调整 `MAX_BYTES`/`MAX_CONCURRENT_JOBS` |
+| 资源耗尽 | 响应体 5MB、超时 25s、单任务 20 页、5 万行、全局并发 2、排队上限 10；HTTP 缓存默认 500 条 / 50MB 自动淘汰 | 按机器配置调整 `MAX_BYTES`/`MAX_CONCURRENT_JOBS`/`CACHE_MAX_ENTRIES` |
 | XSS | 前端全部用 `textContent` 渲染；严格 CSP（禁止内联脚本与外链资源） | 不要把抓取结果直接贴进其他页面 |
 | Cookie 被窃听 | 默认 `COOKIE_SECURE=false` 便于本地 HTTP | 上线 HTTPS 后必须设 `COOKIE_SECURE=true` |
 | 明文密码 | 支持 `APP_PASSWORD_HASH` | 生产环境用哈希，不要提交 `.env` 到 Git |
@@ -263,12 +290,12 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**82 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**108 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文、缓存命中、深度抓取与五种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：82 passed
+python -m pytest -q          # 预期：108 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |
@@ -296,6 +323,13 @@ python -m pytest -q          # 预期：82 passed
 | 21 | RSS / Atom | 输入订阅源地址 | 识别为 `feed` 模式，输出条目标题 / 链接 / 日期 |
 | 22 | 框架页目录 | 输入 `https://www.stats.gov.cn/sj/ndsj/2024/indexch.htm` | 自动跟进框架，得到 727 行章节条目 |
 | 23 | 动态页回退 | 安装 Playwright 后输入 JS 渲染页面 | 静态为空时自动用浏览器重试并提示"已自动切换浏览器渲染" |
+| 24 | HTTP 缓存 | 对同一 URL 连续抓取两次 | 第二次 `via=cache`，缓存库条目增加；切换「本次跳过缓存」后重新请求 |
+| 25 | ETag 校验 | 缓存过期后再次抓取 | 服务端返回 304 时复用本地内容，前端显示"ETag 校验复用" |
+| 26 | 限速重试 | 目标返回 429 且带 `Retry-After` | 自动等待后重试，不是立即失败；日志/耗时可见 |
+| 27 | 深度抓取 | 入口页 + 深度 1 + 最多 5 页 | 自动跟随同域链接，结果含「来源页面」列，可导出 |
+| 28 | XPath / Schema | 条目 `//li`、字段 `.//a` + `href` | 正确输出文本与绝对链接；`/api/analyze` 返回 `schema` |
+| 29 | Markdown 导出 | 结果区点「导出 Markdown」 | 生成 Markdown 表格，可直接粘贴到文档 |
+| 30 | 指标接口 | 登录后访问 `/api/metrics` | 返回任务状态分布、总行数、缓存命中/未命中/304 次数 |
 
 ---
 
@@ -306,6 +340,10 @@ python -m pytest -q          # 预期：82 passed
 **忘记密码**：设置 `.env` 的 `APP_PASSWORD` 后重启即可覆盖；或删除 `data/generated_password.hash` 与 `data/initial_password.txt` 重新生成。
 
 **抓取返回 403 / 空数据**：多数是 JS 渲染或反爬。先在「页面渲染」选「浏览器渲染」并安装 Playwright；仍失败则说明站点有强风控，请勿强行绕过。
+
+**为什么第二次抓取很快就完成**：命中了本地 HTTP 缓存。需要获取最新内容时，在高级设置把缓存策略改为「强制刷新并校验 ETag」或「本次跳过缓存」；也可以删除 `data/http_cache.db`。
+
+**深度抓取为什么没抓满页数**：同域过滤会跳过图片、PDF、CSS/JS 等静态资源；`DEEP_MAX_PAGES` 是服务端硬上限（默认 50），达到上限会在结果提示「已截断」。用包含 / 排除正则可以更精准地圈定内容页。
 
 **中文乱码**：抓取端会按响应头与 meta charset 自动解码（含 gb18030 兜底）；导出 CSV 带 BOM，用 Excel 直接双击打开即可。
 
