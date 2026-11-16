@@ -168,7 +168,7 @@ function renderAnalysis(data) {
   selectedTableIndex = null;
 
   if (lastAutoRule && lastAutoRule.mode) {
-    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', ocr: '图片文字识别' };
+    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', structured: '页面结构化数据', feed: 'RSS / Atom 订阅源', ocr: '图片文字识别' };
     const card = node('div', 'auto-card');
     const score = lastAutoRule.score === undefined ? '' : ` · 置信度 ${Math.round(lastAutoRule.score * 100)}%`;
     card.appendChild(node('b', '', `智能识别：${labels[lastAutoRule.mode] || lastAutoRule.mode}${score}`));
@@ -283,6 +283,8 @@ function renderJob(job) {
       viaLabels[meta.via] || '本地处理',
       detection.reason || '',
       averageConfidence !== undefined ? `OCR 平均置信度 ${(Number(averageConfidence) * 100).toFixed(1)}%` : '',
+      meta.auto_browser ? '已自动切换浏览器渲染' : '',
+      meta.frame_url ? '已跟进框架页' : '',
       meta.pages_fetched ? `${meta.pages_fetched} 页` : '',
       meta.elapsed_ms ? `${(meta.elapsed_ms / 1000).toFixed(1)} 秒` : '',
       job.url || meta.image_name || '',

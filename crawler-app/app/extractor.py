@@ -43,6 +43,17 @@ def _collapse(value: str) -> str:
     return re.sub(r"[\s\u00a0]+", " ", value or "").strip()
 
 
+def _dedupe_repeated(value: str) -> str:
+    """折叠“标题 标题 标题”这类因响应式/隐藏节点造成的重复文本。"""
+    tokens = value.split()
+    for repeat in (4, 3, 2):
+        if len(tokens) >= repeat and len(tokens) % repeat == 0:
+            size = len(tokens) // repeat
+            if tokens[:size] * repeat == tokens:
+                return " ".join(tokens[:size])
+    return value
+
+
 def _unique_columns(names: Iterable[str]) -> list[str]:
     seen: dict[str, int] = {}
     result: list[str] = []
@@ -209,7 +220,7 @@ def extract_css(
                             value = urljoin(base_url, value)
             except Exception as exc:
                 warnings.append(f"字段 {spec.get('name')} 解析失败：{exc}")
-            row.append(_collapse(value))
+            row.append(_dedupe_repeated(_collapse(value)))
         if any(row):
             rows.append(row)
     if not rows:
@@ -478,6 +489,20 @@ def _auto_candidate_nodes(item) -> list:
     return nodes
 
 
+def _covered_by(value: str, existing: list[str]) -> bool:
+    """新文本值是否只是已有字段文本的重复拼接（例如 <a><p>标题</p><span>日期</span></a>）。"""
+    residual = value
+    for old in existing:
+        if not old:
+            continue
+        if old in residual:
+            residual = residual.replace(old, " ")
+        elif residual in old:
+            residual = ""  # 新字段只是已有字段的一部分
+            break
+    return len(_collapse(residual)) <= 2
+
+
 def _infer_auto_fields(items: list) -> tuple[list[dict], float]:
     sample = items[:12]
     candidates: dict[tuple[str, str], dict] = {}
@@ -527,23 +552,115 @@ def _infer_auto_fields(items: list) -> tuple[list[dict], float]:
         key=lambda spec: (-spec["priority"], -spec["coverage"], spec["selector"], spec["attr"])
     )
     fields: list[dict] = []
+    field_values: list[list[str]] = []
     text_signatures: list[tuple[str, ...]] = []
+    text_value_lists: list[list[str]] = []
+    text_selectors: list[str] = []
     coverages: list[float] = []
     for spec in accepted:
-        signature = tuple(spec["values"])
-        if spec["attr"] == "text" and any(signature == old for old in text_signatures):
+        values = spec["values"]
+        nonempty = [value for value in values if value]
+        if not nonempty:
             continue
+        # 多个条目中几乎不变的文本（固定标签、图标文案）没有采集价值
+        if len(nonempty) >= 3 and len(set(nonempty)) / len(nonempty) < 0.3:
+            continue
+        if spec["attr"] == "text":
+            signature = tuple(values)
+            if any(signature == old for old in text_signatures):
+                continue
+            # 子节点字段比父节点更具体，先保留，稍后删除可被完全还原的父字段
+            is_nested = any(
+                _selector_descendant(spec["selector"], old) for old in text_selectors
+            )
+            if text_value_lists and not is_nested:
+                covered = sum(
+                    1
+                    for index, value in enumerate(values)
+                    if not value
+                    or _covered_by(value, [old[index] for old in text_value_lists])
+                )
+                if covered / len(values) >= 0.8:
+                    continue  # 父节点文本只是子字段的重复拼接
+            text_signatures.append(signature)
+            text_value_lists.append(values)
+            text_selectors.append(spec["selector"])
+        if spec["attr"] in {"href", "src"} and any(
+            field["attr"] == spec["attr"] for field in fields
+        ):
+            continue  # 一个条目通常只需要一个详情链接 / 一张主图
         fields.append({
             "name": spec["name"],
             "selector": spec["selector"],
             "attr": spec["attr"],
         })
+        field_values.append(values)
         coverages.append(spec["coverage"])
-        if spec["attr"] == "text":
-            text_signatures.append(signature)
         if len(fields) >= 6:
             break
+
+    # 删除可由子字段完整拼出的父节点文本（例如 <a><p>标题</p><span>日期</span></a> 的 a 文本）
+    keep = [True] * len(fields)
+    for index, field in enumerate(fields):
+        if field["attr"] != "text":
+            continue
+        children = [
+            child
+            for child in range(len(fields))
+            if child != index
+            and fields[child]["attr"] == "text"
+            and _selector_descendant(fields[child]["selector"], field["selector"])
+        ]
+        if not children:
+            continue
+        covered = sum(
+            1
+            for row, value in enumerate(field_values[index])
+            if not value
+            or _covered_by(value, [field_values[child][row] for child in children])
+        )
+        if covered / max(len(field_values[index]), 1) >= 0.8:
+            keep[index] = False
+    if not all(keep):
+        fields = [field for index, field in enumerate(fields) if keep[index]]
+        field_values = [
+            values for index, values in enumerate(field_values) if keep[index]
+        ]
+        coverages = [value for index, value in enumerate(coverages) if keep[index]]
+
+    date_pattern = re.compile(r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}|\d{1,2}:\d{2}")
+    for field, values in zip(fields, field_values):
+        if field["attr"] != "text":
+            continue
+        nonempty = [value for value in values if value]
+        if nonempty and sum(
+            bool(date_pattern.search(value)) for value in nonempty
+        ) / len(nonempty) >= 0.7:
+            field["name"] = "日期"
+
+    if fields and not any(field["name"] == "标题" for field in fields):
+        text_fields = [
+            (field, values)
+            for field, values in zip(fields, field_values)
+            if field["attr"] == "text"
+            and field["name"] in {"字段", "链接文字", "内容"}
+        ]
+        if text_fields:
+            field, values = max(
+                text_fields,
+                key=lambda pair: sum(len(value) for value in pair[1])
+                / max(len(pair[1]), 1),
+            )
+            average_length = sum(len(value) for value in values) / max(len(values), 1)
+            if average_length >= 4 and field["name"] in {"字段", "链接文字", "内容"}:
+                field["name"] = "标题"
     return fields, (sum(coverages) / len(coverages) if coverages else 0.0)
+
+
+def _selector_descendant(selector: str, ancestor: str) -> bool:
+    return bool(ancestor) and (
+        selector.startswith(ancestor + " > ") or selector.startswith(ancestor + " ")
+    )
 
 
 def _best_auto_table(html: str) -> tuple[Extraction, dict] | None:
@@ -616,12 +733,333 @@ def _looks_numeric(value: str) -> bool:
     )
 
 
+# ------------------------------------------------------------------ 结构化数据
+_JSONLD_TYPES = {
+    "Product",
+    "Article",
+    "NewsArticle",
+    "BlogPosting",
+    "Report",
+    "Recipe",
+    "JobPosting",
+    "Event",
+    "Course",
+    "Book",
+    "Movie",
+    "VideoObject",
+    "SoftwareApplication",
+    "LocalBusiness",
+    "Restaurant",
+}
+_KEY_NAMES = {
+    "name": "名称",
+    "title": "标题",
+    "headline": "标题",
+    "url": "链接",
+    "link": "链接",
+    "href": "链接",
+    "date": "日期",
+    "datepublished": "日期",
+    "publishedat": "日期",
+    "published_at": "日期",
+    "publishtime": "日期",
+    "price": "价格",
+    "description": "摘要",
+    "summary": "摘要",
+    "author": "作者",
+    "image": "图片",
+    "img": "图片",
+    "category": "分类",
+    "tag": "标签",
+    "tags": "标签",
+    "content": "内容",
+    "position": "序号",
+}
+_JS_ASSIGN = re.compile(
+    r"window\.(__INITIAL_STATE__|__NUXT__|__DATA__|__PRELOADED_STATE__)\s*=\s*",
+    re.IGNORECASE,
+)
+
+
+def _friendly_column(key: str) -> str:
+    return _KEY_NAMES.get(key.split(".")[-1].lower(), key[:60])
+
+
+def _scalar_text(value, key: str, base_url: str) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if not isinstance(value, str):
+        return ""
+    text = _collapse(value)
+    if text and key.split(".")[-1].lower() in {"url", "link", "href", "src"}:
+        text = urljoin(base_url, text)
+    return text[:2000]
+
+
+def _flatten_record(
+    record: dict, base_url: str, prefix: str = "", depth: int = 0, out: dict | None = None
+) -> dict[str, str]:
+    out = {} if out is None else out
+    for key, value in record.items():
+        if str(key).startswith("@") or value is None:
+            continue
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            if depth < 2:
+                _flatten_record(value, base_url, f"{name}.", depth + 1, out)
+        elif isinstance(value, list):
+            dicts = [item for item in value if isinstance(item, dict)]
+            if dicts and depth < 2:
+                _flatten_record(dicts[0], base_url, f"{name}.", depth + 1, out)
+            else:
+                text = "；".join(
+                    item
+                    for item in (_scalar_text(v, key, base_url) for v in value)
+                    if item
+                )
+                if text:
+                    out[name] = text[:2000]
+        else:
+            text = _scalar_text(value, key, base_url)
+            if text:
+                out[name] = text
+    return out
+
+
+def _records_to_extraction(
+    records: list, base_url: str
+) -> Extraction | None:
+    flattened = [
+        _flatten_record(record, base_url)
+        for record in records[:2000]
+        if isinstance(record, dict)
+    ]
+    flattened = [record for record in flattened if record]
+    if not flattened:
+        return None
+    columns: list[str] = []
+    for record in flattened:
+        for key in record:
+            if key not in columns:
+                columns.append(key)
+    if len(columns) < 2:
+        return None
+    columns = columns[:12]
+    rows = [[record.get(key, "") for key in columns] for record in flattened]
+    return Extraction(
+        columns=_unique_columns([_friendly_column(key) for key in columns]),
+        rows=rows,
+    )
+
+
+def _iter_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_dicts(child)
+
+
+def _jsonld_candidates(soup: BeautifulSoup) -> list[tuple[float, list, str]]:
+    import json
+
+    candidates: list[tuple[float, list, str]] = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text()
+        if not raw or len(raw) > 2_000_000:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        for obj in _iter_dicts(payload):
+            raw_types = obj.get("@type")
+            types = {raw_types} if isinstance(raw_types, str) else set(raw_types or [])
+            if "ItemList" in types:
+                items = []
+                for element in obj.get("itemListElement") or []:
+                    if not isinstance(element, dict):
+                        continue
+                    if isinstance(element.get("item"), dict):
+                        item = dict(element["item"])
+                        for key in ("url", "name"):
+                            if element.get(key):
+                                item.setdefault(key, element[key])
+                        items.append(item)
+                    else:
+                        items.append(element)
+                if len(items) >= 2:
+                    score = min(0.9, 0.68 + 0.02 * min(len(items), 10))
+                    candidates.append((score, items, "JSON-LD 列表数据"))
+            elif types & _JSONLD_TYPES:
+                fields = _flatten_record(obj, "")
+                if len(fields) >= 2:
+                    # 单条 JSON-LD 常是站点自身介绍，置信度要低于真实列表/正文
+                    score = min(0.78, 0.4 + 0.025 * min(len(fields), 10))
+                    candidates.append((score, [obj], "JSON-LD 结构化数据"))
+    return candidates
+
+
+def _json_payloads(soup: BeautifulSoup):
+    import json
+
+    for script in soup.find_all("script"):
+        raw = script.string or script.get_text()
+        if not raw or len(raw) > 2_000_000:
+            continue
+        script_id = str(script.get("id") or "")
+        script_type = str(script.get("type") or "").lower()
+        payload = None
+        if script_id in {"__NEXT_DATA__", "__NUXT_DATA__"} or script_type in {
+            "application/json",
+            "application/ld+json",
+        }:
+            try:
+                payload = json.loads(raw)
+            except (ValueError, TypeError):
+                payload = None
+        elif "window." in raw:
+            match = _JS_ASSIGN.search(raw)
+            if match:
+                tail = raw[match.end():].strip().rstrip(";")
+                try:
+                    payload = json.loads(tail)
+                except (ValueError, TypeError):
+                    payload = None
+        if payload is not None:
+            yield payload
+
+
+def _record_lists(value, depth: int = 0) -> list[tuple[float, list]]:
+    found: list[tuple[float, list]] = []
+    if depth > 6:
+        return found
+    if isinstance(value, dict):
+        for child in value.values():
+            found.extend(_record_lists(child, depth + 1))
+    elif isinstance(value, list):
+        dicts = [item for item in value if isinstance(item, dict)]
+        if len(value) >= 3 and len(dicts) / len(value) >= 0.8:
+            flattened = [_flatten_record(item, "") for item in dicts[:30]]
+            columns = set().union(*flattened) if flattened else set()
+            rich = sum(len(record) >= 2 for record in flattened) / max(len(flattened), 1)
+            if len(columns) >= 2 and rich >= 0.6:
+                keywords = {"name", "title", "url", "link", "price", "date", "content"}
+                bonus = 0.03 * bool(keywords & {key.split(".")[-1].lower() for key in columns})
+                score = min(
+                    0.9,
+                    0.55
+                    + 0.015 * min(len(value), 15)
+                    + 0.015 * min(len(columns), 8)
+                    + bonus,
+                )
+                found.append((score, value))
+        for child in value:
+            found.extend(_record_lists(child, depth + 1))
+    return found
+
+
+def extract_structured(html: str, base_url: str) -> tuple[Extraction, dict] | None:
+    """从 JSON-LD、__NEXT_DATA__、内嵌 state 等数据源提取结构化记录。"""
+    soup = make_soup(html)
+    candidates = list(_jsonld_candidates(soup))
+    for payload in _json_payloads(soup):
+        for score, records in _record_lists(payload):
+            candidates.append((score, records, "页面内嵌 JSON 数据"))
+    best = None
+    for score, records, reason in candidates:
+        extraction = _records_to_extraction(records, base_url)
+        if extraction and (best is None or score > best[0]):
+            best = (score, extraction, reason, len(extraction.rows))
+    if best is None:
+        return None
+    score, extraction, reason, count = best
+    return extraction, {
+        "mode": "structured",
+        "score": round(score, 3),
+        "reason": f"{reason}：{count} 条记录",
+    }
+
+
+def frame_sources(html: str, base_url: str) -> list[tuple[str, str]]:
+    """返回页面内 frame / iframe 的 (name, 绝对地址)，用于跟进年鉴等框架目录页。"""
+    soup = make_soup(html)
+    frames = []
+    for frame in soup.find_all(["frame", "iframe"]):
+        src = str(frame.get("src") or "").strip()
+        if src:
+            frames.append((str(frame.get("name") or ""), urljoin(base_url, src)))
+    return frames
+
+
+def looks_like_js_shell(html: str) -> bool:
+    soup = make_soup(html)
+    scripts = len(soup.find_all("script"))
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = _collapse(soup.get_text(" ", strip=True))
+    return scripts >= 2 and len(text) < 200
+
+
+def extract_feed(xml_text: str, base_url: str) -> tuple[Extraction, dict]:
+    """解析 RSS / Atom，输出标题、链接、日期、摘要、作者。"""
+    import xml.etree.ElementTree as ET
+
+    try:
+        clean = re.sub(r"^\s*<\?xml[^>]*\?>", "", xml_text)
+        root = ET.fromstring(clean)
+    except ET.ParseError as exc:
+        raise ExtractionError(f"Feed 解析失败：{exc}") from exc
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1].lower()
+
+    items = [node for node in root.iter() if local(node.tag) in {"item", "entry"}]
+    rows: list[list[str]] = []
+    for item in items[:500]:
+        values: dict[str, str] = {}
+        link = ""
+        for child in item:
+            name = local(child.tag)
+            text = _collapse(child.text or "") or _collapse(
+                "".join(child.itertext())
+            )
+            if name == "link":
+                link = link or str(child.get("href") or text)
+            elif name in {"title", "pubdate", "published", "updated", "description", "summary"}:
+                values.setdefault(name, text)
+            elif name in {"creator", "author"}:
+                values.setdefault("author", text)
+        if link:
+            link = urljoin(base_url, link)
+        title = values.get("title", "")
+        date = values.get("pubdate") or values.get("published") or values.get("updated", "")
+        summary = values.get("description") or values.get("summary", "")
+        author = values.get("author", "")
+        if title or link:
+            rows.append([title, link, date, summary[:1000], author])
+    if not rows:
+        raise ExtractionError("Feed 中没有找到条目")
+    return Extraction(columns=["标题", "链接", "日期", "摘要", "作者"], rows=rows), {
+        "mode": "feed",
+        "score": 0.95,
+        "reason": f"识别为 RSS / Atom 订阅源：{len(rows)} 条",
+    }
+
+
+
+
+
 def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
     soup = make_soup(html)
     best = None
-    parents = soup.find_all(True)[:200]
+    parents = soup.find_all(True)[:400]
     for parent in parents:
-        if parent.find_parent("table") is not None or parent.name == "table":
+        if parent.name in {"table", "tr", "tbody", "thead", "tfoot"}:
             continue
         if _auto_blocked(parent):
             continue
@@ -667,7 +1105,9 @@ def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
             except Exception:
                 continue
             original_count = sum(any(node is item for item in items) for node in matched)
-            if original_count / len(items) < 0.8 or len(matched) > max(len(items) * 1.5, len(items) + 2):
+            # 目录页常重复使用同一个 id（如多个 ul#foldinglist），选择器会合并所有章节；
+            # 只要原始条目都被覆盖且数量可控，就接受这种“超集”匹配。
+            if original_count / len(items) < 0.8 or len(matched) > 5000:
                 continue
 
             fields, field_coverage = _infer_auto_fields(items)
@@ -693,6 +1133,13 @@ def _best_auto_list(html: str, base_url: str) -> tuple[Extraction, dict] | None:
                 score -= 0.25
             if average_length < 8:
                 score -= 0.15
+            links_per_item = statistics.median(
+                len(item.find_all("a")) for item in sample
+            )
+            if links_per_item > 3:
+                score -= 0.3  # 条目本身是一整块目录容器，不是一行数据
+            if average_length > 300:
+                score -= 0.2
             score = max(0.0, min(score, 1.0))
             if best is None or score > best[0]:
                 best = (score, extraction, selector, fields, len(items), median_similarity)
@@ -730,6 +1177,11 @@ def extract_auto(
             )
         elif mode == "article":
             extraction = extract_article(html, base_url)
+        elif mode == "structured":
+            structured = extract_structured(html, base_url)
+            if structured is None:
+                raise ExtractionError("后续页未找到与第一页相同的结构化数据")
+            extraction = structured[0]
         else:
             raise ExtractionError("自动识别规则无效，请重新抓取第一页")
         return extraction, rule
@@ -751,12 +1203,27 @@ def extract_auto(
     if list_candidate:
         candidates.append(list_candidate)
 
+    structured_candidate = None
+    try:
+        structured_candidate = extract_structured(html, base_url)
+    except Exception:
+        structured_candidate = None
+    if structured_candidate:
+        candidates.append(structured_candidate)
+
     article_candidate = None
     article_score = 0.0
     try:
         article = extract_article(html, base_url)
         body = article.rows[0][-1] if article.rows else ""
         article_score = min(len(body) / 600, 1) * 0.8 + 0.2 * bool(article.rows[0][0])
+        page_text = _collapse(soup.get_text(" ", strip=True))
+        link_text = sum(
+            len(_collapse(link.get_text(" ", strip=True)))
+            for link in soup.find_all("a")
+        )
+        if page_text and link_text / len(page_text) >= 0.5:
+            article_score *= 0.6  # 链接目录页，不应被当成正文
         article_candidate = (article, {
             "mode": "article",
             "score": round(article_score, 3),
@@ -777,6 +1244,12 @@ def extract_auto(
     elif article_candidate and article_candidate[0].rows[0][-1].strip():
         extraction, detected = article_candidate
         low_confidence = True
+    elif looks_like_js_shell(html):
+        raise ExtractionError(
+            "页面正文由 JavaScript 动态渲染，静态抓取没有内容。"
+            "启动参数中已支持浏览器渲染；若未安装 Playwright，请执行 "
+            "pip install playwright 与 python -m playwright install chromium"
+        )
     else:
         raise ExtractionError(
             "未能自动识别有效数据。若是 JS 动态页面请尝试浏览器渲染；"
@@ -787,6 +1260,7 @@ def extract_auto(
     detected["candidates"] = {
         "table": table_candidate[1]["score"] if table_candidate else 0,
         "list": list_candidate[1]["score"] if list_candidate else 0,
+        "structured": structured_candidate[1]["score"] if structured_candidate else 0,
         "article": round(article_score, 3),
     }
     if low_confidence:

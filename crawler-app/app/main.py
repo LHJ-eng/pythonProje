@@ -17,7 +17,7 @@ from . import storage
 from .auth import LoginRateLimiter, issue_session, read_session, verify_password
 from .config import COOKIE_NAME, Settings, load_settings
 from .exporter import EXPORTERS, column_stats, to_csv, to_html_report, to_json, to_xlsx
-from .extractor import ExtractionError, analyze_page
+from .extractor import ExtractionError, analyze_page, extract_feed, frame_sources
 from .fetcher import FetchError, fetch_url
 from .jobs import JobRequest, JobRunner, sanitize_params
 from .security import InvalidURLError, validate_url
@@ -198,6 +198,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ignore_robots=body.ignore_robots,
                     allow_image=True,
                 )
+                if result.kind == "html" and "<frameset" in result.html.lower():
+                    frames = frame_sources(result.html, result.url)
+                    if frames:
+                        preferred = {"main", "content", "mainframe", "body"}
+                        chosen = next(
+                            (frame for frame in frames if frame[0].lower() in preferred),
+                            frames[-1],
+                        )
+                        result = await fetch_url(
+                            chosen[1],
+                            settings,
+                            browser=body.browser,
+                            ignore_robots=body.ignore_robots,
+                            allow_image=True,
+                        )
+                if result.kind == "feed":
+                    extraction, rule = extract_feed(result.html, result.url)
+                    return {
+                        "title": "RSS / Atom 订阅源",
+                        "url": result.url,
+                        "tables": [],
+                        "article": {"length": 0, "preview": ""},
+                        "auto": {
+                            **rule,
+                            "rows": len(extraction.rows),
+                            "columns": extraction.columns,
+                            "preview": extraction.rows[:3],
+                        },
+                        "links": 0,
+                        "chars": len(result.html),
+                    }
                 if result.kind == "image":
                     return {
                         "title": "图片文字识别",

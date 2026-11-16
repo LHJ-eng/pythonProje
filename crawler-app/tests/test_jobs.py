@@ -175,3 +175,104 @@ def test_remote_image_url_auto_switches_to_ocr(settings, monkeypatch):
     assert detail["meta"]["resolved_mode"] == "ocr"
     assert detail["meta"]["auto_detection"]["mode"] == "ocr"
     assert detail["total_rows"] == 1
+
+
+def test_frameset_job_follows_main_frame(settings, monkeypatch):
+    async def fake_fetch(url, settings, **kwargs):
+        if url.endswith("index.htm"):
+            html = (
+                "<html><frameset>"
+                "<frame name='top' src='top.htm'>"
+                "<frame name='main' src='main.htm'>"
+                "</frameset></html>"
+            )
+        elif url.endswith("main.htm"):
+            html = _cards(1)
+        else:
+            html = "<html><body><p>导航菜单</p></body></html>"
+        return FetchResult(
+            html=html, url=url, status=200,
+            content_type="text/html", elapsed_ms=1, via="http",
+        )
+
+    monkeypatch.setattr("app.jobs.fetch_url", fake_fetch)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/jobs",
+            json={"source": "url", "url": "https://example.com/dir/index.htm"},
+            headers=_login(client),
+        )
+        assert created.status_code == 202, created.text
+        detail = _wait_for_job(client, created.json()["id"])
+
+    assert detail["status"] == "done", detail
+    assert detail["total_rows"] == 3
+    assert detail["meta"]["frame_url"] == "https://example.com/dir/main.htm"
+    assert detail["meta"]["resolved_mode"] == "css"
+
+
+def test_auto_browser_fallback_when_static_page_is_js_shell(settings, monkeypatch):
+    calls = []
+
+    async def fake_fetch(url, settings, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("browser"):
+            return FetchResult(
+                html=_cards(1), url=url, status=200,
+                content_type="text/html", elapsed_ms=1, via="browser",
+            )
+        return FetchResult(
+            html=(
+                "<html><body><div id='app'></div>"
+                "<script src='a.js'></script><script src='b.js'></script></body></html>"
+            ),
+            url=url, status=200, content_type="text/html", elapsed_ms=1, via="http",
+        )
+
+    monkeypatch.setattr("app.jobs.fetch_url", fake_fetch)
+    monkeypatch.setattr("app.jobs._playwright_available", lambda: True)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/jobs",
+            json={"source": "url", "url": "https://example.com/spa"},
+            headers=_login(client),
+        )
+        detail = _wait_for_job(client, created.json()["id"])
+
+    assert detail["status"] == "done", detail
+    assert detail["total_rows"] == 3
+    assert detail["meta"]["auto_browser"] is True
+    assert detail["meta"]["via"] == "browser"
+    assert any(call.get("browser") for call in calls)
+
+
+def test_feed_url_job_extracts_items(settings, monkeypatch):
+    rss = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel>
+      <item><title>第一条</title><link>/1</link><pubDate>2026-01-01</pubDate></item>
+      <item><title>第二条</title><link>/2</link><pubDate>2026-01-02</pubDate></item>
+    </channel></rss>"""
+
+    async def fake_fetch(url, settings, **kwargs):
+        return FetchResult(
+            html=rss, url=url, status=200,
+            content_type="application/rss+xml", elapsed_ms=1, via="http", kind="feed",
+        )
+
+    monkeypatch.setattr("app.jobs.fetch_url", fake_fetch)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/jobs",
+            json={"source": "url", "url": "https://example.com/rss"},
+            headers=_login(client),
+        )
+        detail = _wait_for_job(client, created.json()["id"])
+
+    assert detail["status"] == "done", detail
+    assert detail["meta"]["resolved_mode"] == "feed"
+    assert detail["columns"] == ["标题", "链接", "日期", "摘要", "作者"]
+    assert detail["total_rows"] == 2
+    assert detail["rows"][0][0] == "第一条"

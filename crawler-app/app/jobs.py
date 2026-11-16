@@ -17,7 +17,9 @@ from .extractor import (
     extract_article,
     extract_auto,
     extract_css,
+    extract_feed,
     extract_table,
+    frame_sources,
     parse_tables,
 )
 from .exporter import column_stats
@@ -25,6 +27,15 @@ from .fetcher import FetchError, fetch_url
 from .security import InvalidURLError, clean_text, normalize_url
 
 MAX_HTML_CHARS = 3_000_000
+
+
+def _playwright_available() -> bool:
+    try:
+        from importlib.util import find_spec
+
+        return find_spec("playwright") is not None
+    except Exception:
+        return False
 
 
 class FieldSpec(BaseModel):
@@ -231,6 +242,18 @@ class JobRunner:
                 allow_image=request.mode == "auto",
             )
             pages_fetched += 1
+            frame_url = None
+            framed_result = None
+            if (
+                request.mode == "auto"
+                and result.kind == "html"
+                and "<frameset" in result.html.lower()
+            ):
+                result, frame_url, framed_result = await self._follow_frameset(
+                    result, request
+                )
+            if frame_url:
+                meta["frame_url"] = frame_url
             meta["final_url"] = result.url
             meta["http_status"] = result.status
             meta["via"] = result.via
@@ -238,7 +261,9 @@ class JobRunner:
             try:
                 if source_kind and result.kind != source_kind:
                     raise ExtractionError("页面类型与第一页不一致")
-                if result.kind == "image":
+                if framed_result is not None:
+                    extraction, detected = framed_result
+                elif result.kind == "image":
                     if request.mode != "auto":
                         raise ExtractionError("图片 URL 请使用智能识别模式")
                     extraction, ocr_meta = await self._recognize_image(result.body, page=page)
@@ -249,14 +274,49 @@ class JobRunner:
                     }
                     meta.setdefault("ocr_pages", []).append(ocr_meta)
                     meta["ocr"] = ocr_meta
+                elif result.kind == "feed":
+                    if request.mode != "auto":
+                        raise ExtractionError("RSS / Atom 订阅源请使用智能识别模式")
+                    extraction, detected = extract_feed(result.html, result.url)
                 else:
-                    extraction, detected = self._extract_one(
-                        result.html,
-                        result.url,
-                        request,
-                        page=page,
-                        auto_rule=auto_rule,
-                    )
+                    try:
+                        extraction, detected = self._extract_one(
+                            result.html,
+                            result.url,
+                            request,
+                            page=page,
+                            auto_rule=auto_rule,
+                        )
+                    except (ExtractionError, ValueError):
+                        if not (
+                            page == 1
+                            and request.mode == "auto"
+                            and not request.browser
+                            and _playwright_available()
+                        ):
+                            raise
+                        storage.update_job(
+                            db,
+                            job_id,
+                            message="静态页面内容不足，正在用浏览器渲染…",
+                        )
+                        result = await fetch_url(
+                            page_url,
+                            self.settings,
+                            browser=True,
+                            ignore_robots=request.ignore_robots,
+                            allow_image=False,
+                        )
+                        meta["auto_browser"] = True
+                        meta["via"] = result.via
+                        meta["final_url"] = result.url
+                        meta["http_status"] = result.status
+                        extraction, detected = self._extract_one(
+                            result.html,
+                            result.url,
+                            request,
+                            page=page,
+                        )
                 if first is not None and extraction.columns != first.columns:
                     raise ExtractionError("识别列与第一页不一致，为避免数据错位已停止")
             except (ExtractionError, ValueError) as exc:
@@ -283,6 +343,61 @@ class JobRunner:
         first.rows = all_rows
         first.warnings.extend(warnings)
         return first, meta
+
+    async def _follow_frameset(self, result, request: JobRequest):
+        """年鉴等 frameset 目录页：逐一尝试 main / contents 等框架，选出能提取数据的一帧。"""
+        frames = frame_sources(result.html, result.url)
+        if not frames:
+            return result, None, None
+        preferred = {"main", "content", "contentframe", "mainframe", "body"}
+        skipped = {"top", "header", "footer", "bottom", "menu", "nav"}
+
+        def rank(frame: tuple[str, str]) -> tuple[int, int]:
+            name = frame[0].lower()
+            if name in preferred:
+                return (0, 0)
+            if name not in skipped:
+                return (1, 0)
+            return (2, 0)
+
+        ordered = sorted(frames, key=rank)
+        fallback = None
+        best = None
+        for name, src in ordered[:4]:
+            try:
+                framed = await fetch_url(
+                    src,
+                    self.settings,
+                    browser=request.browser,
+                    ignore_robots=request.ignore_robots,
+                    allow_image=request.mode == "auto",
+                )
+            except (FetchError, InvalidURLError):
+                continue
+            if framed.kind in {"image", "feed"}:
+                return framed, src, None
+            if "<frameset" in framed.html.lower():
+                continue
+            if fallback is None:
+                fallback = (framed, src)
+            try:
+                extraction, detected = self._extract_one(
+                    framed.html, framed.url, request, page=1
+                )
+            except (ExtractionError, ValueError):
+                continue
+            score = float(detected.get("score", 0.5)) if detected else 0.5
+            if best is None or score > best[0]:
+                best = (score, framed, src, extraction, detected)
+            if score >= 0.6:
+                break
+        if best is not None:
+            _, framed, src, extraction, detected = best
+            return framed, src, (extraction, detected)
+        if fallback is not None:
+            framed, src = fallback
+            return framed, src, None
+        return result, None, None
 
     async def _recognize_image(self, data: bytes, *, page: int) -> tuple[Extraction, dict]:
         from .ocr import recognize_image

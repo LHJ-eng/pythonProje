@@ -12,7 +12,12 @@
 | 能力 | 说明 |
 | --- | --- |
 | 密码门禁 | PBKDF2-SHA256 哈希存储；HMAC 签名会话 Cookie（HttpOnly / SameSite=Lax）；登录失败限流（5 次锁定 5 分钟） |
-| 智能识别（默认） | 自动选择 HTML 表格、重复列表 / 卡片或正文，自动生成条目选择器与字段；无需新手手填规则，低置信度时会提示核对 |
+| 智能识别（默认） | 分层自动识别：HTML 表格 → 重复列表 / 卡片 → 页面结构化数据（JSON-LD、`__NEXT_DATA__`、`window.__INITIAL_STATE__` 等）→ RSS/Atom → 正文文章；自动生成条目选择器与字段，低置信度时会提示核对 |
+| 结构化数据抽取 | 直接解析 JSON-LD `ItemList`、Next.js / Nuxt 等内嵌 JSON，遇到由 JS 注入数据的电商、资讯、招聘等站点时无需浏览器也能取到列表 |
+| RSS / Atom 支持 | 直接输入订阅源地址（`.xml` / `.rss` / `feed`）即可解析出条目列表，自动识别标题、链接、日期、摘要字段 |
+| 框架页自动跟进 | 遇到 `frameset` 老式目录页（如统计年鉴）时自动尝试 main / content / left 等子框架，选择真正含数据的框架继续提取 |
+| 自动浏览器回退 | 静态抓取结果为空、且本机已安装 Playwright 时，自动用浏览器重新渲染一次；前端会提示"已自动切换浏览器渲染" |
+| 字段智能清洗 | 自动去掉父子节点重复文本、折叠"标题 标题 标题"式重复、剔除常量列、按语义命名（标题 / 日期 / 链接），一个条目只保留一个链接或图片字段 |
 | 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；可查看并修改智能识别出的规则 |
 | 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页；第一页识别后冻结规则，后续页复用，结构异常时保留已抓数据并停止 |
 | 图片文字识别 | 基于 RapidOCR + ONNX Runtime 的本地中文 OCR；支持 JPG / PNG / WebP 图片 URL 与本地上传，逐行输出文字、置信度和坐标 |
@@ -24,8 +29,8 @@
 | SSRF 防护 | 仅 http/https；解析 DNS 后拦截内网/回环/链路本地/元数据地址；每次重定向都重新校验 |
 | robots.txt | 默认遵守，可在明确授权时手动忽略 |
 | 资源限制 | 响应体大小、超时、页数、行数、并发任务数、排队上限；图片最大 10 MB、2000 万像素并校验真实格式 |
-| 可选浏览器渲染 | 安装 Playwright 后可抓 JS 动态渲染页面 |
-| 可选正文增强 | 安装 trafilatura 后正文抽取质量更高（未安装时使用内置启发式算法） |
+| 浏览器渲染 | 安装 Playwright 后可抓 JS 动态渲染页面；智能模式下静态结果为空会自动回退一次 |
+| 正文增强 | 内置 trafilatura 作为基础依赖，正文与元数据抽取质量更高；解析失败时回退内置启发式算法 |
 | 部署方式 | Docker Compose 一键部署，或本地 Python 虚拟环境运行 |
 
 ---
@@ -41,12 +46,14 @@
 | [crawl4ai](https://github.com/unclecode/crawl4ai) | ~87.4k | 开源 LLM 爬虫（Apache-2.0） | 借鉴本地部署与 Markdown/结构化输出；作为二期 LLM 抽取的候选 |
 | [Scrapy](https://github.com/scrapy/scrapy) | ~65.4k | 分布式爬虫框架 | 适合百万级抓取；一期单机采集无需引入其工程复杂度 |
 | [crawlee-python](https://github.com/apify/crawlee-python) | ~9.7k | Python 爬虫 + 浏览器自动化 | 参考其请求队列/重试设计 |
-| [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为可选依赖**，未安装时使用内置正文算法 |
+| [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为基础依赖**，正文与元数据抽取优先使用，失败时回退内置算法 |
 | [autoscraper](https://github.com/alirezamika/autoscraper) | ~8.1k | 给样例自动学习规则 | 参考其自动学习思路；当前零输入场景使用确定性的 DOM 结构识别 |
 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | ~92.7k | 完整 OCR 与表格结构识别平台 | 能力全面但运行时较重，本次未引入完整 Paddle 运行时 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | ~8.5k | 轻量本地 ONNX OCR | **已接入**，适合中文图片、本地隐私处理与 PyCharm 部署 |
 
 > 说明：星星数以 GitHub 官方 API 实测为准；数字会随时间变化。
+
+**本轮参考 GitHub 落地的增强**：参考 crawl4ai / firecrawl 的"HTML→结构化数据"分层思路，新增 JSON-LD 与内嵌 JSON（`__NEXT_DATA__`、`__INITIAL_STATE__`）抽取；参考 Scrapling 的自适应与多策略重试，加入静态失败后的浏览器自动回退；参考 trafilatura 抽取正文；并补充 RSS/Atom 解析与 `frameset` 子框架自动跟进，覆盖老式目录站与订阅源。
 
 ---
 
@@ -195,11 +202,7 @@ COPY requirements-ocr.txt ./
 RUN pip install --no-cache-dir -r requirements-ocr.txt
 ```
 
-**3）更好的正文抽取**
-
-```bash
-pip install trafilatura
-```
+> 正文抽取库 trafilatura 已写进基础 `requirements.txt`，无需额外安装。
 
 ---
 
@@ -207,15 +210,16 @@ pip install trafilatura
 
 登录后左侧是任务配置，中间是结果，右侧是历史。
 
-1. **最常用的网页采集（无需设置字段）**：保持「网页 / 图片链接」→ 粘贴 URL → 直接点「开始抓取」。系统会优先识别数据表，其次识别重复列表 / 卡片并自动生成字段，最后回退正文。
+1. **最常用的网页采集（无需设置字段）**：保持「网页 / 图片链接」→ 粘贴 URL → 直接点「开始抓取」。系统会按「数据表 → 重复列表 / 卡片 → 结构化数据（JSON-LD / 内嵌 JSON）→ RSS/Atom → 正文」的顺序自动识别。
    例：`https://quotes.toscrape.com/` 可自动得到 10 条语录及作者、链接、标签等字段。
-2. **识别图片 URL 中的文字**：把 `.jpg`、`.png`、`.webp` 图片地址当作普通链接粘贴，保持智能识别，点击「开始抓取」，系统会自动切换 OCR。
-3. **国家统计局 2024 年鉴图片表示例**：输入
-   `https://www.stats.gov.cn/sj/ndsj/2024/html/C02-01.jpg`，点击「开始抓取」。年鉴首页是框架目录，系统不会自动遍历整站；请先打开具体统计表图片，再提交其图片 URL。
-4. **上传本地图片**：来源选择「本地图片识别」→ 选择 JPG / PNG / WebP → 点击「开始识别」。OCR 输出页码、行号、文字、置信度和文字框坐标，可直接导出 Excel / CSV。
-5. **分页采集**：展开「高级设置」，URL 写 `https://example.com/list?page={page}`，页数 5，间隔 1.5 秒。多页会复用第一页规则，避免每页字段漂移。
-6. **手动修改规则**：可先点「分析页面结构」查看智能识别结果，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
-7. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
+2. **RSS / Atom 订阅源**：直接粘贴订阅地址（如 `https://www.ruanyifeng.com/blog/atom.xml`），系统按条目列表输出标题、链接、日期、摘要。
+3. **识别图片 URL 中的文字**：把 `.jpg`、`.png`、`.webp` 图片地址当作普通链接粘贴，保持智能识别，点击「开始抓取」，系统会自动切换 OCR。
+4. **国家统计局 2024 年鉴目录（框架页）示例**：输入
+   `https://www.stats.gov.cn/sj/ndsj/2024/indexch.htm`，系统会自动跟进目录框架并提取 727 条章节条目；也可直接输入单张表图片 `https://www.stats.gov.cn/sj/ndsj/2024/html/C02-01.jpg` 做 OCR。
+5. **上传本地图片**：来源选择「本地图片识别」→ 选择 JPG / PNG / WebP → 点击「开始识别」。OCR 输出页码、行号、文字、置信度和文字框坐标，可直接导出 Excel / CSV。
+6. **分页采集**：展开「高级设置」，URL 写 `https://example.com/list?page={page}`，页数 5，间隔 1.5 秒。多页会复用第一页规则，避免每页字段漂移。
+7. **手动修改规则**：可先点「分析页面结构」查看智能识别结果，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
+8. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
 
 结果区可导出 CSV / Excel / JSON / HTML 报告；历史任务随时回看与重新导出。图片 OCR 当前按“视觉行”提取文字，**不会自动还原复杂统计表的行列关系、合并单元格或表头层级**；低置信度文字请对照原图复核。
 
@@ -255,12 +259,12 @@ pip install trafilatura
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**67 个自动化测试全部通过，并用本地站点完成三种网页模式与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**79 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文与四种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：67 passed
+python -m pytest -q          # 预期：79 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |
@@ -284,6 +288,10 @@ python -m pytest -q          # 预期：67 passed
 | 17 | 粘贴 HTML | 上传本地 `.html` 文件后采集 | 无需联网即可得到数据 |
 | 18 | 一键智能识别 | 只输入 `https://quotes.toscrape.com/` 并开始 | 不填写选择器，自动得到 10 行卡片数据 |
 | 19 | 图片 OCR | 上传清晰中文图片或输入年鉴 JPG 地址 | 输出逐行文字与置信度，可导出 Excel / CSV |
+| 20 | 结构化数据 | 输入含 JSON-LD / `__NEXT_DATA__` 的页面 | 自动得到条目列表，字段含标题与链接 |
+| 21 | RSS / Atom | 输入订阅源地址 | 识别为 `feed` 模式，输出条目标题 / 链接 / 日期 |
+| 22 | 框架页目录 | 输入 `https://www.stats.gov.cn/sj/ndsj/2024/indexch.htm` | 自动跟进框架，得到 727 行章节条目 |
+| 23 | 动态页回退 | 安装 Playwright 后输入 JS 渲染页面 | 静态为空时自动用浏览器重试并提示"已自动切换浏览器渲染" |
 
 ---
 

@@ -17,6 +17,12 @@ from .security import InvalidURLError, validate_url
 MAX_REDIRECTS = 5
 MAX_IMAGE_BYTES = 10_000_000
 _IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_FEED_CONTENT_TYPES = {
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/xml",
+    "text/xml",
+}
 _META_CHARSET = re.compile(
     rb"""<meta[^>]+charset=["']?\s*([a-zA-Z0-9_\-]+)""", re.IGNORECASE
 )
@@ -176,6 +182,15 @@ def _is_supported_image(body: bytes, content_type: str) -> bool:
     )
 
 
+def _looks_like_feed(body: bytes, mime: str) -> bool:
+    if mime in _FEED_CONTENT_TYPES and mime != "application/xml":
+        return True
+    head = body[:4096].lstrip().lower()
+    if head.startswith(b"<?xml"):
+        head = head.split(b"?>", 1)[-1].lstrip()
+    return head.startswith(b"<rss") or head.startswith(b"<feed")
+
+
 async def fetch_url(
     url: str,
     settings: Settings,
@@ -208,8 +223,12 @@ async def fetch_url(
         finally:
             await response.aclose()
 
-    kind = "image" if allow_image and _is_supported_image(body, content_type) else "html"
-    if status >= 400 and (not browser or kind == "image"):
+    kind = "html"
+    if allow_image and _is_supported_image(body, content_type):
+        kind = "image"
+    elif allow_image and _looks_like_feed(body, mime):
+        kind = "feed"
+    if status >= 400 and (not browser or kind in {"image", "feed"}):
         hint = "，该站点可能需要浏览器渲染" if status in (403, 429, 503) and kind == "html" else ""
         raise FetchError(f"目标返回 HTTP {status}{hint}")
     if kind == "image":
@@ -218,7 +237,12 @@ async def fetch_url(
         html = ""
     else:
         html = _decode_body(body, content_type)
-        if "html" not in content_type.lower() and content_type:
+        if (
+            kind == "html"
+            and content_type
+            and "html" not in content_type.lower()
+            and "xml" not in content_type.lower()
+        ):
             raise FetchError(f"目标不是 HTML 页面（Content-Type: {content_type}）")
 
     via = "http"
