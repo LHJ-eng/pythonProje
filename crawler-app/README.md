@@ -2,7 +2,7 @@
 
 输入一个网页链接，系统会自动识别页面里的**表格、列表卡片、正文文章**；输入图片链接或上传本地图片，则使用本地中文 OCR 提取文字。结果可在线预览并导出 **CSV / Excel / JSON / Markdown / HTML 报告**。带**密码门禁**，可完全本地部署，网页数据和图片不会发送给第三方 AI 服务。
 
-> 企业级能力：HTTP 缓存（ETag 条件请求）、同域限速与指数退避重试、同域深度抓取、XPath / CSS 双选择器、可复用的提取 Schema、缓存与任务指标接口。
+> 企业级能力：HTTP 缓存（ETag 条件请求）、同域限速与指数退避重试、同域深度抓取、XPath / CSS 双选择器、可复用的提取 Schema、**可视化点选与规则模板**、缓存与任务指标接口。
 
 > 适合个人或小团队做公开数据采集、竞品价格监控、内容归档、报表取数。
 > 请只采集你有权访问的数据，并遵守目标站点服务条款、robots.txt 与当地法律法规。
@@ -22,6 +22,9 @@
 | 字段智能清洗 | 自动去掉父子节点重复文本、折叠"标题 标题 标题"式重复、剔除常量列、按语义命名（标题 / 日期 / 链接），一个条目只保留一个链接或图片字段 |
 | 主内容清洗 | 内置 readability-lxml（Mozilla Readability 移植），先剥离导航 / 侧栏 / 广告再识别列表与正文，避免周围元素干扰 |
 | 高级手动模式 | 保留 HTML 表格、CSS 选择器、正文三种手动模式；条目与字段均支持 **CSS / XPath** 混用，可查看并修改智能识别出的规则 |
+| 可视化点选 | 参考 EasySpider / Automa：服务端生成安全快照，在弹窗中直接点击表格或重复列表项，自动生成条目选择器与字段；候选表格会标注「隐藏 / 嵌套」，选中的规则一键套用到表单 |
+| 隐藏数据展开 | 快照清洗会移除脚本、事件与外部样式，展开 `display:none` 隐藏元素；浏览器渲染时可自动点击「展开 / 加载更多 / 查看全部」按钮，再滚动整页取数据 |
+| 规则模板 | 把表格 / CSS / 正文提取规则保存到 SQLite，支持下拉套用与删除，跨任务复用；可视化点选生成的规则也可保存 |
 | 提取 Schema | 「分析页面」会同时输出可复用的提取 Schema（模式、条目选择器、字段、类型）；可通过请求参数 `rule` 直接复用，服务端会校验结构，避免无效规则进入执行环节 |
 | 多页采集 | URL 中使用 `{page}` 占位符，最多 20 页；第一页识别后冻结规则，后续页复用，结构异常时保留已抓数据并停止 |
 | 深度抓取 | 参考 crawl4ai `DeepCrawlStrategy`：同域 BFS、最大深度 / 页面数、包含 / 排除正则、自动读取 `/sitemap.xml`；每个页面复用首个页面的识别规则，结果新增「来源页面」列 |
@@ -57,12 +60,16 @@
 | [trafilatura](https://github.com/adbar/trafilatura) | ~7.1k | 正文/元数据抽取 | **已接入为基础依赖**，正文与元数据抽取优先使用，失败时回退内置算法 |
 | [python-readability](https://github.com/buriy/python-readability) | ~1.6k | Mozilla Readability 的 Python 移植 | **已接入为基础依赖**，用于剥离导航/侧栏/广告后再做列表与正文识别；正文抽取与 trafilatura 并行打分择优 |
 | [autoscraper](https://github.com/alirezamika/autoscraper) | ~8.1k | 给样例自动学习规则 | 参考其自动学习思路；当前零输入场景使用确定性的 DOM 结构识别 |
+| [MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) | ~71.4k | 多平台社媒数据采集 | 借鉴其可配置采集队列与工程化组织方式；按你的要求，本项目**暂不做社媒平台采集** |
+| [EasySpider](https://github.com/NaiboWang/EasySpider) | ~44.8k | 可视化点选采集器 | **本轮重点参考**：借鉴「可视化点选 + 工作流」交互，落地服务端安全快照 + 受限 iframe 点击反推 CSS 规则；未引入其 Electron 桌面端 |
+| [automa](https://github.com/AutomaApp/automa) | ~10k | 浏览器自动化工作流扩展 | 借鉴「点击元素生成选择器」与工作流编排思路；本项目用网页内弹窗实现，无需安装扩展 |
+| [Spider_XHS](https://github.com/cv-cat/Spider_XHS) | ~2k | 小红书数据采集 | 仅参考其字段设计、分页与登录态处理经验；本项目**暂不做社媒采集** |
 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | ~92.7k | 完整 OCR 与表格结构识别平台 | 能力全面但运行时较重，本次未引入完整 Paddle 运行时 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | ~8.5k | 轻量本地 ONNX OCR | **已接入**，适合中文图片、本地隐私处理与 PyCharm 部署 |
 
 > 说明：星星数以 GitHub 官方 API 实测为准；数字会随时间变化。
 
-**本轮参考 GitHub 落地的增强**：参考 crawl4ai / firecrawl 的"HTML→结构化数据"分层思路，新增 JSON-LD 与内嵌 JSON（`__NEXT_DATA__`、`__INITIAL_STATE__`）抽取；参考 crawl4ai 的 `cache_mode` 落地 SQLite HTTP 缓存与 ETag 条件请求，参考 `DeepCrawlStrategy` 落地同域深度抓取，参考 `RateLimiter` 落地同域限速与 `Retry-After` 退避；参考 Scrapling 的自适应与多策略重试，加入静态失败后的浏览器自动回退与资源拦截；参考 trafilatura 抽取正文；并补充 RSS/Atom 解析、`frameset` 子框架自动跟进、XPath 选择器与 Markdown 输出。
+**本轮参考 GitHub 落地的增强**：参考 crawl4ai / firecrawl 的"HTML→结构化数据"分层思路，新增 JSON-LD 与内嵌 JSON（`__NEXT_DATA__`、`__INITIAL_STATE__`）抽取；参考 crawl4ai 的 `cache_mode` 落地 SQLite HTTP 缓存与 ETag 条件请求，参考 `DeepCrawlStrategy` 落地同域深度抓取，参考 `RateLimiter` 落地同域限速与 `Retry-After` 退避；参考 Scrapling 的自适应与多策略重试，加入静态失败后的浏览器自动回退与资源拦截；参考 trafilatura 抽取正文；参考 EasySpider / Automa 的"可视化点选"落地安全快照、表格 / 列表候选推断与点击生成规则；并补充 RSS/Atom 解析、`frameset` 子框架自动跟进、XPath 选择器、规则模板与 Markdown 输出。
 
 ---
 
@@ -79,6 +86,7 @@ crawler-app/
 │   ├── cache.py         # SQLite HTTP 缓存（TTL / ETag 条件请求 / 容量上限）
 │   ├── deep_crawl.py    # 同域 BFS 深度抓取 + sitemap 发现
 │   ├── extractor.py     # 智能表格 / 重复列表 / 正文识别 + CSS / XPath + Schema
+│   ├── snapshot.py      # 安全快照清洗 + 表格 / 列表候选推断（可视化点选）
 │   ├── ocr.py           # RapidOCR 懒加载、图片校验、视觉分行
 │   ├── exporter.py      # CSV / XLSX / JSON / Markdown / HTML 报告
 │   ├── storage.py       # SQLite 任务存储与统计
@@ -229,6 +237,7 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 | `MAX_RETRIES` / `RETRY_BACKOFF` | `2` / `0.6` | 重试次数与初始退避；自动遵循 `Retry-After` |
 | `BROWSER_BLOCK_RESOURCES` | `true` | 浏览器渲染时拦截图片 / 字体 / 媒体资源 |
 | `BROWSER_SCROLL_STEPS` | `6` | 整页滚动次数，用于触发懒加载 |
+| `BROWSER_EXPAND_CLICKS` | `5` | 浏览器渲染时最多自动点击多少次「展开 / 加载更多 / 查看全部」 |
 | `DEEP_MAX_PAGES` | `50` | 深度抓取页数硬上限 |
 | `USER_AGENT` | `DataHarvester/1.0` | 建议改成带联系方式的自定义 UA |
 
@@ -250,7 +259,10 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 8. **缓存策略**：高级设置中可选「优先使用缓存（默认）」「强制刷新并校验 ETag」「本次跳过缓存」。相同 URL 在 TTL 内不会重复请求目标站点；缓存库位于 `data/http_cache.db`，可随时删除重建。
 9. **XPath 采集**：手动选择器的「条目选择器类型」与每个字段都可独立选 CSS / XPath，例如条目 `//li[@class='row']`、字段 `.//a` + 属性 `href`。
 10. **手动修改 / 复用规则**：可先点「分析页面结构」查看智能识别结果与 Schema，再点「在高级设置中查看 / 修改规则」。只有自动结果不准确时才需要手填条目选择器与字段映射。
-11. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网。
+11. **可视化点选**：点左侧「可视化点选」按钮，系统会生成安全快照并弹出预览窗。直接在预览里点击表格或重复列表项，右侧会自动生成条目选择器与字段；候选区还会列出所有表格（含「隐藏」「嵌套」标记）和列表规则，点一下即可选中。确认后点「套用到表单」或「套用并开始抓取」。
+12. **隐藏表格 / 折叠数据**：快照会自动展开 `display:none` 与 `hidden` 元素；如果数据要点击「加载更多 / 展开全部」才出现，请在高级设置勾选「浏览器渲染时自动点击展开按钮」（需安装 Playwright），并设置「等待选择器」。
+13. **规则模板**：在高级设置把当前表格 / CSS / 正文规则保存为模板，下次从「规则模板」下拉直接套用；模板只保存规则、不保存数据，可随时删除。
+14. **本地 HTML**：来源切「HTML 源码」，粘贴代码或选择 `.html` 文件后开始抓取，全程不联网；同样可以使用可视化点选。
 
 结果区可导出 CSV / Excel / JSON / Markdown / HTML 报告；历史任务随时回看与重新导出。图片 OCR 当前按“视觉行”提取文字，**不会自动还原复杂统计表的行列关系、合并单元格或表头层级**；低置信度文字请对照原图复核。
 
@@ -266,7 +278,7 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 | SSRF（借服务端访问内网） | 仅 http/https；解析所有 A/AAAA 记录并拒绝非公网 IP；拒绝 `file://`/`localhost`/`169.254.169.254`；每次重定向重新校验；URL 禁止携带账号密码 | 云主机建议同时用安全组/网络策略禁止访问元数据地址与内网段 |
 | 抓取越权 | 默认遵守 robots.txt；忽略需显式勾选 | 只抓公开、有权访问的数据；不要绕过登录墙/付费墙 |
 | 资源耗尽 | 响应体 5MB、超时 25s、单任务 20 页、5 万行、全局并发 2、排队上限 10；HTTP 缓存默认 500 条 / 50MB 自动淘汰 | 按机器配置调整 `MAX_BYTES`/`MAX_CONCURRENT_JOBS`/`CACHE_MAX_ENTRIES` |
-| XSS | 前端全部用 `textContent` 渲染；严格 CSP（禁止内联脚本与外链资源） | 不要把抓取结果直接贴进其他页面 |
+| XSS | 前端全部用 `textContent` 渲染；严格 CSP（脚本仅同源）；可视化快照在 `sandbox` iframe（不启用脚本）中渲染，并移除 script / `on*` / `javascript:` / meta refresh | 不要把抓取结果直接贴进其他页面 |
 | Cookie 被窃听 | 默认 `COOKIE_SECURE=false` 便于本地 HTTP | 上线 HTTPS 后必须设 `COOKIE_SECURE=true` |
 | 明文密码 | 支持 `APP_PASSWORD_HASH` | 生产环境用哈希，不要提交 `.env` 到 Git |
 
@@ -290,12 +302,12 @@ RUN pip install --no-cache-dir -r requirements-ocr.txt
 
 ## 七、怎样才算"真正做出来"：验收清单
 
-下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**108 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文、缓存命中、深度抓取与五种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测**）。
+下面是可复现的验收标准，全部通过即代表系统真实可用（本项目当前状态：**115 个自动化测试全部通过，并用真实站点完成表格 / 重复列表 / 结构化数据 / RSS / frameset 目录 / 正文、缓存命中、深度抓取与五种导出的端到端验证，另用国家统计局 2024 年鉴中文图片完成本地/图片 URL 两条 OCR 链路的实测；可视化点选已用真实浏览器完成登录、快照、表格 / 列表选择与规则套用的 UI 实测**）。
 
 ```bash
 cd crawler-app
 pip install -r requirements-dev.txt
-python -m pytest -q          # 预期：108 passed
+python -m pytest -q          # 预期：115 passed
 ```
 
 | # | 验收项 | 操作 / 命令 | 通过标准 |
@@ -330,6 +342,9 @@ python -m pytest -q          # 预期：108 passed
 | 28 | XPath / Schema | 条目 `//li`、字段 `.//a` + `href` | 正确输出文本与绝对链接；`/api/analyze` 返回 `schema` |
 | 29 | Markdown 导出 | 结果区点「导出 Markdown」 | 生成 Markdown 表格，可直接粘贴到文档 |
 | 30 | 指标接口 | 登录后访问 `/api/metrics` | 返回任务状态分布、总行数、缓存命中/未命中/304 次数 |
+| 31 | 可视化点选 | 粘贴一段含表格和 3 个卡片的 HTML → 「可视化点选」 | 弹窗显示安全快照、表格 / 列表候选；点表格后自动填入条目选择器与「名称 / 价格」字段 |
+| 32 | 隐藏表格 | 页面里放一个 `style="display:none"` 的表格 | 候选区标注「隐藏」，快照中已展开，可选择并抓取 |
+| 33 | 规则模板 | 保存 CSS 规则 → 刷新页面 → 下拉套用 | 条目选择器、字段、属性完整恢复；删除后下拉不再出现 |
 
 ---
 
@@ -359,7 +374,7 @@ python -m pytest -q          # 预期：108 passed
 
 ## 九、二期路线
 
-- 可视化点选选择器（浏览器里点元素自动生成规则）
+- 更完整的工作流录制（多步点击、翻页、表单提交）
 - 定时任务与增量去重
 - 代理池、请求指纹与更强的反爬适配（参考 Scrapling）
 - LLM 辅助结构化抽取（参考 Crawl4AI / Firecrawl）

@@ -81,6 +81,7 @@ class JobRequest(BaseModel):
     # 浏览器渲染增强
     wait_for: str = Field(default="", max_length=300)
     scan_full_page: bool = True
+    expand_clicks: int = Field(default=0, ge=0, le=30)
     cache_mode: Literal["enabled", "bypass", "refresh"] | None = None
     # 复用 / 导入的提取规则（由「分析页面」导出的 schema）
     rule: dict | None = None
@@ -297,6 +298,7 @@ class JobRunner:
                 cache_mode=request.cache_mode,
                 wait_for=request.wait_for or None,
                 scan_full_page=request.scan_full_page,
+                expand_clicks=request.expand_clicks,
             )
             pages_fetched += 1
             frame_url = None
@@ -367,6 +369,7 @@ class JobRunner:
                             cache_mode="bypass",
                             wait_for=request.wait_for or None,
                             scan_full_page=request.scan_full_page,
+                            expand_clicks=request.expand_clicks,
                         )
                         meta["auto_browser"] = True
                         meta["via"] = result.via
@@ -435,6 +438,7 @@ class JobRunner:
             delay=request.delay,
             wait_for=request.wait_for or None,
             scan_full_page=request.scan_full_page,
+            expand_clicks=request.expand_clicks,
         )
         warnings: list[str] = list(crawled.errors[:10])
         first: Extraction | None = None
@@ -541,6 +545,7 @@ class JobRunner:
                     cache_mode=request.cache_mode,
                     wait_for=request.wait_for or None,
                     scan_full_page=request.scan_full_page,
+                    expand_clicks=request.expand_clicks,
                 )
             except (FetchError, InvalidURLError):
                 continue

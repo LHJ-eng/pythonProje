@@ -241,6 +241,7 @@ def _fetch_with_browser(
     *,
     wait_for: str | None = None,
     scan_full_page: bool = True,
+    expand_clicks: int = 0,
 ) -> str:
     """同步 Playwright 调用，放在线程中执行，避免阻塞事件循环。"""
     try:
@@ -293,6 +294,46 @@ def _fetch_with_browser(
                     except Exception:
                         pass
                 page.wait_for_timeout(800)
+                # 点击“展开 / 加载更多 / 查看全部”等按钮，展开被折叠的数据
+                clicks = min(
+                    max(0, int(expand_clicks)),
+                    max(0, int(settings.browser_expand_clicks)),
+                )
+                if clicks > 0:
+                    try:
+                        page.evaluate(
+                            """async (limit) => {
+                                const pattern = /(展开|更多|加载更多|查看全部|显示全部|展开全部|更多内容|more|load more|view all|show all|see more)/i;
+                                const nodes = Array.from(document.querySelectorAll(
+                                    'button, [role="button"], a[href="#"], a[href^="javascript:"]'
+                                ));
+                                let clicked = 0;
+                                for (const el of nodes) {
+                                    if (clicked >= limit) break;
+                                    const text = (
+                                        el.textContent || el.getAttribute('aria-label') || ''
+                                    ).trim();
+                                    if (!text || text.length > 30 || !pattern.test(text)) continue;
+                                    if (el.disabled) continue;
+                                    try {
+                                        el.addEventListener(
+                                            'click', (event) => event.preventDefault(),
+                                            { once: true }
+                                        );
+                                        el.click();
+                                        clicked += 1;
+                                        await new Promise((resolve) => setTimeout(resolve, 250));
+                                    } catch (error) {
+                                        // 单个按钮失败不影响其他按钮
+                                    }
+                                }
+                                return clicked;
+                            }""",
+                            clicks,
+                        )
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(400)
                 # 滚动到底部触发懒加载 / 虚拟列表渲染，再回到顶部
                 steps = int(settings.browser_scroll_steps) if scan_full_page else 0
                 if steps > 0:
@@ -367,6 +408,7 @@ async def fetch_url(
     cache_mode: str | None = None,
     wait_for: str | None = None,
     scan_full_page: bool = True,
+    expand_clicks: int = 0,
 ) -> FetchResult:
     started = time.perf_counter()
     url = validate_url(url, allow_private=settings.allow_private_network)
@@ -455,6 +497,7 @@ async def fetch_url(
             settings,
             wait_for=wait_for,
             scan_full_page=scan_full_page,
+            expand_clicks=expand_clicks,
         )
         via = "browser"
 

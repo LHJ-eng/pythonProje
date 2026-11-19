@@ -25,10 +25,19 @@ from .exporter import (
     to_markdown,
     to_xlsx,
 )
-from .extractor import ExtractionError, analyze_page, extract_feed, frame_sources
+from .extractor import (
+    ExtractionError,
+    analyze_page,
+    build_schema,
+    extract_auto,
+    extract_feed,
+    frame_sources,
+    normalize_rule,
+)
 from .fetcher import FetchError, fetch_url
 from .jobs import JobRequest, JobRunner, sanitize_params
 from .security import InvalidURLError, validate_url
+from .snapshot import build_snapshot
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -47,13 +56,55 @@ class AnalyzeBody(BaseModel):
     ignore_robots: bool = False
     wait_for: str = Field(default="", max_length=300)
     scan_full_page: bool = True
+    expand_clicks: int = Field(default=0, ge=0, le=30)
     cache_mode: Literal["enabled", "bypass", "refresh"] | None = None
+
+
+class SnapshotBody(BaseModel):
+    source: Literal["url", "html"] = "url"
+    url: str = Field(default="", max_length=2048)
+    html: str = Field(default="", max_length=3_000_000)
+    base_url: str = Field(default="", max_length=2048)
+    browser: bool = False
+    ignore_robots: bool = False
+    wait_for: str = Field(default="", max_length=300)
+    scan_full_page: bool = True
+    expand_clicks: int = Field(default=0, ge=0, le=30)
+    cache_mode: Literal["enabled", "bypass", "refresh"] | None = None
+    reveal_hidden: bool = True
+
+
+class TemplateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=200)
+    source_url: str = Field(default="", max_length=2048)
+    rule: dict
+    template_id: str | None = Field(default=None, max_length=40)
 
 
 def _client_ip(request: Request) -> str:
     # 注意：如部署在反向代理后，需在代理层正确设置 X-Forwarded-For，
     # 并在这里改为只信任代理写入的头，否则限流可被伪造。
     return request.client.host if request.client else "unknown"
+
+
+def _auto_payload(html: str, base_url: str) -> dict:
+    """智能识别摘要 + 可复用 schema，供快照端点附带返回。"""
+    try:
+        extraction, detected = extract_auto(html, base_url)
+        return {
+            "detected": {
+                **detected,
+                "rows": len(extraction.rows),
+                "columns": extraction.columns,
+                "preview": extraction.rows[:3],
+            },
+            "schema": build_schema(
+                extraction, detected, source_url=base_url
+            ),
+        }
+    except ExtractionError as exc:
+        return {"detected": {"mode": None, "error": str(exc)}, "schema": None}
 
 
 def _session(request: Request) -> dict | None:
@@ -83,9 +134,9 @@ def _set_security_headers(response: Response, settings: Settings) -> None:
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
-        "base-uri 'none'; form-action 'self'",
+        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; frame-src 'self' blob:; "
+        "frame-ancestors 'none'; form-action 'self'",
     )
     if settings.cookie_secure:
         response.headers.setdefault(
@@ -103,7 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         print("请登录后在 .env 中设置 APP_PASSWORD，并删除初始密码文件。")
         print("=" * 64)
 
-    app = FastAPI(title="DataHarvester", version="1.1.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DataHarvester", version="1.2.0", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.limiter = LoginRateLimiter()
     app.state.runner = JobRunner(settings)
@@ -140,13 +191,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "1.1.0"}
+        return {"status": "ok", "version": "1.2.0"}
 
     @app.get("/api/metrics")
     async def metrics(session: dict = Depends(require_auth)):
         cache_stats = settings.cache.stats() if settings.cache else {"enabled": False}
         return {
-            "version": "1.1.0",
+            "version": "1.2.0",
             "jobs": storage.job_stats(settings.db_path),
             "cache": cache_stats,
             "settings": {
@@ -227,6 +278,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     cache_mode=body.cache_mode,
                     wait_for=body.wait_for or None,
                     scan_full_page=body.scan_full_page,
+                    expand_clicks=body.expand_clicks,
                 )
                 if result.kind == "html" and "<frameset" in result.html.lower():
                     frames = frame_sources(result.html, result.url)
@@ -245,6 +297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             cache_mode=body.cache_mode,
                             wait_for=body.wait_for or None,
                             scan_full_page=body.scan_full_page,
+                            expand_clicks=body.expand_clicks,
                         )
                 if result.kind == "feed":
                     extraction, rule = extract_feed(result.html, result.url)
@@ -283,6 +336,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ExtractionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/snapshot")
+    async def snapshot_page(
+        body: SnapshotBody, session: dict = Depends(require_csrf)
+    ):
+        if body.source == "html":
+            if len(body.html.strip()) < 20:
+                raise HTTPException(status_code=400, detail="粘贴的 HTML 内容过短")
+            html = body.html
+            base_url = body.base_url or "https://example.com/"
+            final_url, via, status, elapsed = base_url, "html", 200, 0
+        else:
+            try:
+                url = validate_url(
+                    body.url, allow_private=settings.allow_private_network
+                )
+            except InvalidURLError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            try:
+                async with app.state.analyze_sem:
+                    result = await fetch_url(
+                        url,
+                        settings,
+                        browser=body.browser,
+                        ignore_robots=body.ignore_robots,
+                        allow_image=False,
+                        cache_mode=body.cache_mode,
+                        wait_for=body.wait_for or None,
+                        scan_full_page=body.scan_full_page,
+                        expand_clicks=body.expand_clicks,
+                    )
+            except (FetchError, InvalidURLError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if result.kind != "html":
+                raise HTTPException(
+                    status_code=400,
+                    detail="该地址不是 HTML 页面，无法生成可视化快照",
+                )
+            html = result.html
+            base_url = result.url
+            final_url, via = result.url, result.via
+            status, elapsed = result.status, result.elapsed_ms
+
+        payload = build_snapshot(
+            html, base_url, reveal_hidden=body.reveal_hidden
+        )
+        payload.update(_auto_payload(html, base_url))
+        payload.update(
+            final_url=final_url, via=via, status=status, elapsed_ms=elapsed
+        )
+        return payload
+
+    @app.get("/api/templates")
+    async def list_templates(session: dict = Depends(require_auth)):
+        return {"templates": storage.list_templates(settings.db_path)}
+
+    @app.post("/api/templates")
+    async def save_template(
+        body: TemplateBody, session: dict = Depends(require_csrf)
+    ):
+        try:
+            rule = normalize_rule(body.rule)
+        except ExtractionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not rule:
+            raise HTTPException(status_code=400, detail="提取规则不能为空")
+        return storage.save_template(
+            settings.db_path,
+            name=body.name.strip(),
+            rule=rule,
+            description=body.description.strip(),
+            source_url=body.source_url.strip(),
+            template_id=body.template_id,
+        )
+
+    @app.delete("/api/templates/{template_id}")
+    async def remove_template(
+        template_id: str, session: dict = Depends(require_csrf)
+    ):
+        if not storage.delete_template(settings.db_path, template_id):
+            raise HTTPException(status_code=404, detail="模板不存在")
+        return {"ok": True}
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(

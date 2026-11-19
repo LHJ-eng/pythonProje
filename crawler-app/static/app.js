@@ -172,6 +172,7 @@ function currentRequest({ forAnalyze = false } = {}) {
     fields: collectFields(),
     wait_for: $('wait-for').value.trim(),
     scan_full_page: $('scan-full-page').checked,
+    expand_clicks: $('expand-clicks').checked ? 5 : 0,
     cache_mode: $('cache-mode').value,
     deep: $('deep').checked,
     max_depth: Number($('max-depth').value) || 0,
@@ -529,6 +530,677 @@ function resetResult() {
   loadHistory();
 }
 
+/* ------------------------------------------------------------------ 规则模板 */
+function applyRuleToForm(rule) {
+  if (!rule || !rule.mode) return false;
+  const mode = String(rule.mode);
+  if (mode === 'css') {
+    $('advanced').open = true;
+    $('mode').value = 'css';
+    $('item-selector').value = rule.item_selector || '';
+    $('item-selector-type').value = rule.item_selector_type === 'xpath' ? 'xpath' : 'css';
+    $('fields').textContent = '';
+    (rule.fields || []).forEach((field) => addField(
+      field.name || '', field.selector || '', field.attr || 'text',
+      field.selector_type || 'css'
+    ));
+    switchMode('css');
+    return true;
+  }
+  if (mode === 'table') {
+    $('advanced').open = true;
+    $('mode').value = 'table';
+    $('table-index').value =
+      rule.table_index === null || rule.table_index === undefined
+        ? '' : String(rule.table_index);
+    $('first-row-header').checked = Boolean(rule.first_row_header);
+    switchMode('table');
+    return true;
+  }
+  if (mode === 'article' || mode === 'auto') {
+    $('advanced').open = true;
+    $('mode').value = mode;
+    switchMode(mode);
+    return true;
+  }
+  return false;
+}
+
+function currentRule() {
+  const mode = $('mode').value;
+  if (mode === 'css') {
+    const fields = collectFields();
+    if (!$('item-selector').value.trim() || !fields.length) return null;
+    return {
+      mode: 'css',
+      item_selector: $('item-selector').value.trim(),
+      item_selector_type: $('item-selector-type').value,
+      fields,
+    };
+  }
+  if (mode === 'table') {
+    const raw = $('table-index').value.trim();
+    return {
+      mode: 'table',
+      table_index: raw === '' ? null : Number(raw),
+      first_row_header: $('first-row-header').checked,
+    };
+  }
+  if (mode === 'article') return { mode: 'article' };
+  if (lastAutoRule && ['table', 'css', 'article', 'structured'].includes(lastAutoRule.mode)) {
+    return lastAutoRule;
+  }
+  return null;
+}
+
+async function loadTemplates(selectName) {
+  const select = $('template-select');
+  const previous = select.value;
+  try {
+    const data = await api('/api/templates');
+    select.textContent = '';
+    select.appendChild(new Option('（未选择模板）', ''));
+    (data.templates || []).forEach((template) => {
+      select.appendChild(new Option(`${template.name} · ${template.rule.mode}`, template.id));
+    });
+    if (selectName) {
+      const match = (data.templates || []).find((item) => item.name === selectName);
+      if (match) select.value = match.id;
+    } else if (previous) {
+      select.value = previous;
+    }
+  } catch (error) {
+    notice(error.message, 'error');
+  }
+}
+
+async function applySelectedTemplate() {
+  const id = $('template-select').value;
+  if (!id) {
+    notice('请先选择一个模板。', 'error');
+    return;
+  }
+  try {
+    const data = await api('/api/templates');
+    const template = (data.templates || []).find((item) => item.id === id);
+    if (!template) throw new Error('模板不存在');
+    if (!applyRuleToForm(template.rule)) throw new Error('模板规则不完整');
+    notice(`已套用模板「${template.name}」，点击「开始抓取」即可。`, 'ok');
+  } catch (error) {
+    notice(error.message, 'error');
+  }
+}
+
+async function deleteSelectedTemplate() {
+  const id = $('template-select').value;
+  if (!id) {
+    notice('请先选择一个模板。', 'error');
+    return;
+  }
+  if (!confirm('确认删除该规则模板？')) return;
+  try {
+    await api(`/api/templates/${id}`, { method: 'DELETE' });
+    notice('模板已删除。', 'ok');
+    await loadTemplates();
+  } catch (error) {
+    notice(error.message, 'error');
+  }
+}
+
+async function saveTemplateFlow(ruleOverride) {
+  const rule = ruleOverride || currentRule();
+  if (!rule) {
+    notice('当前没有可保存的提取规则，请选择表格 / CSS / 正文模式，或先完成页面分析。', 'error');
+    return;
+  }
+  const host = (() => {
+    try { return new URL($('url').value.trim(), location.origin).hostname; } catch { return ''; }
+  })();
+  const suggestion = `${rule.mode === 'css' ? '列表' : rule.mode === 'table' ? '表格' : '正文'}${host ? ' · ' + host : ''}`;
+  const name = (prompt('模板名称', suggestion) || '').trim();
+  if (!name) return;
+  try {
+    await api('/api/templates', {
+      method: 'POST',
+      body: {
+        name,
+        description: '',
+        source_url: $('url').value.trim(),
+        rule,
+      },
+    });
+    notice(`模板「${name}」已保存。`, 'ok');
+    await loadTemplates(name);
+  } catch (error) {
+    notice(error.message, 'error');
+  }
+}
+
+/* ------------------------------------------------------------------ 可视化点选 */
+const pickState = { data: null, rule: null, blobUrl: '', bound: false };
+const SAFE_IDENT = /^-?[_a-zA-Z]+[_a-zA-Z0-9-]*$/;
+
+function cssEscape(value) {
+  if (window.CSS && CSS.escape) return CSS.escape(value);
+  return String(value).replace(/([^a-zA-Z0-9_-])/g, '\\$1');
+}
+
+function pickCssPath(el) {
+  const doc = el.ownerDocument;
+  const parts = [];
+  let current = el;
+  while (current && current.nodeType === 1) {
+    if (current.tagName === 'BODY') {
+      parts.push('body');
+      break;
+    }
+    const id = current.getAttribute('id') || '';
+    if (SAFE_IDENT.test(id)) {
+      try {
+        if (doc.querySelectorAll('#' + cssEscape(id)).length === 1) {
+          parts.push('#' + cssEscape(id));
+          break;
+        }
+      } catch {
+        /* 忽略非法 id */
+      }
+    }
+    const classes = Array.from(current.classList).filter((name) => SAFE_IDENT.test(name)).slice(0, 2);
+    if (classes.length) {
+      parts.push(current.tagName.toLowerCase() + '.' + classes.map(cssEscape).join('.'));
+    } else {
+      const parent = current.parentElement;
+      let index = 1;
+      if (parent) {
+        index = Array.from(parent.children)
+          .filter((child) => child.tagName === current.tagName)
+          .indexOf(current) + 1;
+      }
+      parts.push(`${current.tagName.toLowerCase()}:nth-of-type(${Math.max(index, 1)})`);
+    }
+    current = current.parentElement;
+  }
+  return parts.length ? parts.reverse().join(' > ') : 'body';
+}
+
+function pickRelativeSelector(root, node) {
+  const classes = Array.from(node.classList).filter((name) => SAFE_IDENT.test(name));
+  if (classes.length) {
+    return node.tagName.toLowerCase() + '.' + classes.map(cssEscape).join('.');
+  }
+  const parts = [];
+  let current = node;
+  while (current && current !== root) {
+    const parent = current.parentElement;
+    let index = 1;
+    if (parent) {
+      index = Array.from(parent.children)
+        .filter((child) => child.tagName === current.tagName)
+        .indexOf(current) + 1;
+    }
+    parts.push(`${current.tagName.toLowerCase()}:nth-of-type(${Math.max(index, 1)})`);
+    current = parent;
+  }
+  return parts.reverse().join(' > ');
+}
+
+function pickItemSegment(el) {
+  const tag = el.tagName.toLowerCase();
+  const classes = Array.from(el.classList).filter((name) => SAFE_IDENT.test(name)).slice(0, 2);
+  return classes.length ? `${tag}.${classes.map(cssEscape).join('.')}` : tag;
+}
+
+function pickTarget(start) {
+  if (!start || start.nodeType !== 1) return null;
+  const table = start.closest('table');
+  if (table) return { kind: 'table', el: table };
+  let current = start;
+  const body = start.ownerDocument.body;
+  while (current && current.parentElement && current !== body) {
+    const parent = current.parentElement;
+    const classes = Array.from(current.classList).filter((name) => SAFE_IDENT.test(name));
+    const siblings = Array.from(parent.children).filter((sibling) => {
+      if (sibling.tagName !== current.tagName) return false;
+      if (!classes.length) return true;
+      return classes.some((name) => sibling.classList.contains(name));
+    });
+    if (siblings.length >= 3 && (current.textContent || '').trim().length >= 2) {
+      return { kind: 'list', el: current, parent };
+    }
+    current = parent;
+  }
+  return null;
+}
+
+function guessFieldName(el, attr) {
+  if (attr === 'href') return '链接';
+  if (attr === 'src') return '图片';
+  const tag = el.tagName.toLowerCase();
+  const semantic = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`.toLowerCase();
+  if (/^h[1-6]$/.test(tag) || /title|heading|name/.test(semantic)) return '标题';
+  if (/price|amount|cost|money/.test(semantic)) return '价格';
+  if (tag === 'time' || /date|time|publish/.test(semantic)) return '日期';
+  if (/author|user|byline/.test(semantic)) return '作者';
+  if (tag === 'a') return '链接文字';
+  return '字段';
+}
+
+function collectPickFieldSpecs(root) {
+  const specs = [];
+  const walk = (parent) => {
+    Array.from(parent.children).forEach((child) => {
+      const tag = child.tagName;
+      if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return;
+      const text = (child.textContent || '').trim();
+      if (tag === 'IMG') {
+        if (child.getAttribute('src')) specs.push({ el: child, attr: 'src', priority: 80 });
+        return;
+      }
+      const hasChildText = Array.from(child.children).some((node2) => (node2.textContent || '').trim());
+      if (tag === 'A' && child.getAttribute('href')) {
+        if (text && !hasChildText) specs.push({ el: child, attr: 'text', priority: 60 });
+        specs.push({ el: child, attr: 'href', priority: 70 });
+        if (hasChildText) walk(child);
+        return;
+      }
+      if (hasChildText) {
+        walk(child);
+        return;
+      }
+      if (!text) return;
+      let priority = 50;
+      if (/^H[1-6]$/.test(tag)) priority = 95;
+      else if (/price|amount|cost|money/i.test(`${child.className || ''}`)) priority = 90;
+      else if (tag === 'TIME') priority = 85;
+      specs.push({ el: child, attr: 'text', priority });
+    });
+  };
+  walk(root);
+  return specs;
+}
+
+function buildTableCandidateFromDom(table) {
+  const base = pickCssPath(table);
+  const thead = table.querySelector('thead');
+  const allRows = Array.from(table.querySelectorAll('tr'))
+    .filter((tr) => tr.closest('table') === table);
+  let headerRow = thead
+    ? Array.from(thead.querySelectorAll('tr')).find((tr) => tr.closest('table') === table)
+    : allRows[0];
+  let bodyRows = allRows.filter((tr) => tr !== headerRow);
+  if (!headerRow && bodyRows.length) headerRow = bodyRows[0];
+  const headers = headerRow
+    ? Array.from(headerRow.cells).flatMap((cell) => {
+      const span = Math.min(Number(cell.colSpan) || 1, 50);
+      return Array(span).fill((cell.textContent || '').trim());
+    })
+    : [];
+  const width = Math.max(headers.length, ...bodyRows.map((tr) => tr.cells.length), 0);
+  if (!width) return null;
+  const names = [];
+  for (let index = 0; index < width; index += 1) {
+    names.push(headers[index] || `列${index + 1}`);
+  }
+  const usesTd = bodyRows[0] ? bodyRows[0].querySelector('td') !== null : true;
+  const cellTag = usesTd ? 'td' : 'th';
+  let itemSelector;
+  if (thead && table.querySelector('tbody')) {
+    itemSelector = `${base} tbody tr`;
+  } else if (!thead && headerRow === allRows[0] && !headerRow.querySelector('th') && bodyRows.length >= 2) {
+    itemSelector = `${base} tr + tr`;
+  } else {
+    itemSelector = `${base} tr`;
+  }
+  const fields = names.map((name, index) => ({
+    name,
+    selector: `${cellTag}:nth-child(${index + 1})`,
+    attr: 'text',
+    selector_type: 'css',
+  }));
+  return {
+    kind: 'table',
+    selector: base,
+    item_selector: itemSelector,
+    item_selector_type: 'css',
+    headers: names,
+    fields,
+    rows: bodyRows.length,
+    cols: width,
+    hidden: false,
+    nested: false,
+    sample: bodyRows.slice(0, 3).map((tr) => Array.from(tr.cells).map((cell) => (cell.textContent || '').trim())),
+    rule: {
+      mode: 'css',
+      item_selector: itemSelector,
+      item_selector_type: 'css',
+      fields,
+    },
+  };
+}
+
+function buildListCandidateFromDom(item, parent) {
+  const itemSelector = `${pickCssPath(parent)} > ${pickItemSegment(item)}`;
+  let items = [];
+  try {
+    items = Array.from(parent.children).filter((sibling) => {
+      const classes = Array.from(item.classList).filter((name) => SAFE_IDENT.test(name));
+      return sibling.tagName === item.tagName
+        && (classes.length === 0 || classes.every((name) => sibling.classList.contains(name)));
+    });
+  } catch {
+    items = [item];
+  }
+  const sample = items.slice(0, 4);
+  const specs = collectPickFieldSpecs(item).sort((a, b) => b.priority - a.priority);
+  const fields = [];
+  const usedNames = new Set();
+  const usedSelectors = new Set();
+  specs.forEach((spec) => {
+    const selector = pickRelativeSelector(item, spec.el);
+    const key = `${selector}|${spec.attr}`;
+    if (usedSelectors.has(key)) return;
+    const coverage = sample.length
+      ? sample.filter((node2) => {
+        try {
+          return Boolean(node2.querySelector(selector));
+        } catch {
+          return false;
+        }
+      }).length / sample.length
+      : 1;
+    if (coverage < 0.6) return;
+    let name = guessFieldName(spec.el, spec.attr);
+    if (usedNames.has(name)) {
+      let suffix = 2;
+      while (usedNames.has(`${name}_${suffix}`)) suffix += 1;
+      name = `${name}_${suffix}`;
+    }
+    usedNames.add(name);
+    usedSelectors.add(key);
+    fields.push({
+      name,
+      selector,
+      attr: spec.attr,
+      selector_type: 'css',
+    });
+  });
+  if (!fields.length) return null;
+  return {
+    kind: 'list',
+    selector: itemSelector,
+    item_selector: itemSelector,
+    item_selector_type: 'css',
+    headers: fields.map((field) => field.name),
+    fields,
+    count: items.length,
+    sample: sample.slice(0, 3).map((node2) => fields.map((field) => {
+      const el = node2.querySelector(field.selector);
+      if (!el) return '';
+      return field.attr === 'href' ? (el.getAttribute('href') || '') : field.attr === 'src' ? (el.getAttribute('src') || '') : (el.textContent || '').trim();
+    })),
+    hidden: false,
+    rule: {
+      mode: 'css',
+      item_selector: itemSelector,
+      item_selector_type: 'css',
+      fields,
+    },
+  };
+}
+
+function pickSetEnabled(enabled) {
+  ['pick-apply', 'pick-run', 'pick-save'].forEach((id) => {
+    $(id).disabled = !enabled;
+  });
+}
+
+function renderPickSelection(candidate) {
+  const box = $('pick-selection');
+  box.textContent = '';
+  box.className = 'pick-selection';
+  box.appendChild(node('b', '', candidate.kind === 'table' ? '表格规则' : '列表规则'));
+  box.appendChild(node('div', 'pick-rule-line', `条目选择器：${candidate.item_selector}`));
+  const names = (candidate.fields || []).map((field) => `${field.name}（${field.attr || 'text'}）`).join('、');
+  box.appendChild(node('div', 'pick-rule-line', `字段：${names || '无'}`));
+  if (candidate.hidden) {
+    box.appendChild(node('div', 'warn', '该表格在页面中被隐藏，快照已自动展开。'));
+  }
+  pickSetEnabled(true);
+}
+
+function highlightPickSelection(candidate) {
+  const frame = $('pick-frame');
+  let doc;
+  try {
+    doc = frame.contentDocument;
+  } catch {
+    return;
+  }
+  if (!doc) return;
+  doc.querySelectorAll('.__dh_selected').forEach((el) => el.classList.remove('__dh_selected'));
+  let el = null;
+  try {
+    el = doc.querySelector(candidate.selector || candidate.item_selector);
+  } catch {
+    el = null;
+  }
+  if (el) {
+    el.classList.add('__dh_selected');
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch { /* 忽略 */ }
+  }
+}
+
+function selectPickCandidate(candidate) {
+  if (!candidate || !candidate.rule) return;
+  pickState.rule = candidate.rule;
+  renderPickSelection(candidate);
+  highlightPickSelection(candidate);
+}
+
+function cantRenderPick(message) {
+  $('pick-loading').hidden = false;
+  $('pick-loading').textContent = message;
+}
+
+function loadPickFrame(html) {
+  const frame = $('pick-frame');
+  if (pickState.blobUrl) URL.revokeObjectURL(pickState.blobUrl);
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  pickState.blobUrl = URL.createObjectURL(blob);
+  pickState.bound = false;
+  frame.onload = () => {
+    bindPickFrame();
+    $('pick-loading').hidden = true;
+  };
+  frame.src = pickState.blobUrl;
+}
+
+function bindPickFrame() {
+  const frame = $('pick-frame');
+  let doc;
+  try {
+    doc = frame.contentDocument;
+  } catch {
+    cantRenderPick('浏览器不允许访问快照内容，请换用 Chrome / Edge 重试。');
+    return;
+  }
+  if (!doc || pickState.bound) return;
+  pickState.bound = true;
+  const style = doc.createElement('style');
+  style.textContent = `
+    .__dh_hover { outline: 3px solid #38bdf8 !important; outline-offset: -3px !important; background: rgba(56,189,248,.08) !important; cursor: crosshair !important; }
+    .__dh_selected { outline: 3px solid #34d399 !important; outline-offset: -3px !important; background: rgba(52,211,153,.10) !important; }
+  `;
+  (doc.head || doc.documentElement).appendChild(style);
+
+  const clearHover = () => {
+    doc.querySelectorAll('.__dh_hover').forEach((el) => el.classList.remove('__dh_hover'));
+  };
+  doc.addEventListener('mouseover', (event) => {
+    const target = pickTarget(event.target);
+    clearHover();
+    if (target) target.el.classList.add('__dh_hover');
+  }, true);
+  doc.addEventListener('mouseout', clearHover, true);
+  doc.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = pickTarget(event.target);
+    if (!target) {
+      notice('没有识别到表格或重复列表，请点击更具体的条目。', 'error');
+      return;
+    }
+    let candidate = null;
+    if (target.kind === 'table') {
+      const path = pickCssPath(target.el);
+      candidate = ((pickState.data || {}).tables || []).find((item) => item.selector === path);
+      if (!candidate) candidate = buildTableCandidateFromDom(target.el);
+    } else {
+      candidate = buildListCandidateFromDom(target.el, target.parent);
+      const matched = candidate && ((pickState.data || {}).lists || []).find(
+        (item) => item.item_selector === candidate.item_selector
+      );
+      if (matched) candidate = matched;
+    }
+    if (candidate) {
+      selectPickCandidate(candidate);
+      notice('已生成规则，可点击右侧「套用到表单」。', 'ok');
+    } else {
+      notice('该区域无法生成规则，请尝试点击其他表格或列表。', 'error');
+    }
+  }, true);
+  doc.addEventListener('submit', (event) => event.preventDefault(), true);
+  doc.addEventListener('auxclick', (event) => event.preventDefault(), true);
+}
+
+function renderPickCandidates(data) {
+  const tableBox = $('pick-tables');
+  const listBox = $('pick-lists');
+  tableBox.textContent = '';
+  listBox.textContent = '';
+  const tables = data.tables || [];
+  const lists = data.lists || [];
+  $('pick-table-count').textContent = tables.length ? `共 ${tables.length} 个` : '';
+  $('pick-list-count').textContent = lists.length ? `共 ${lists.length} 个` : '';
+
+  if (!tables.length) {
+    tableBox.appendChild(node('p', 'hint', '未检测到表格，可直接在预览中点击重复列表项。'));
+  }
+  tables.forEach((candidate, index) => {
+    const chip = node('button', 'pick-chip');
+    chip.type = 'button';
+    chip.appendChild(node('span', 'pick-chip-title', `表格 #${index + 1} · ${candidate.rows} 行 × ${candidate.cols} 列`));
+    if (candidate.hidden) chip.appendChild(node('span', 'pick-badge', '隐藏'));
+    if (candidate.nested) chip.appendChild(node('span', 'pick-badge muted-badge', '嵌套'));
+    chip.appendChild(node('span', 'pick-chip-sub', (candidate.headers || []).slice(0, 4).join(' | ') || '无表头'));
+    chip.addEventListener('click', () => selectPickCandidate(candidate));
+    tableBox.appendChild(chip);
+  });
+
+  if (!lists.length) {
+    listBox.appendChild(node('p', 'hint', '未检测到重复列表，可直接在预览中点击卡片。'));
+  }
+  lists.forEach((candidate, index) => {
+    const chip = node('button', 'pick-chip');
+    chip.type = 'button';
+    chip.appendChild(node('span', 'pick-chip-title', `列表 #${index + 1} · ${candidate.count} 个条目`));
+    chip.appendChild(node('span', 'pick-chip-sub', (candidate.headers || []).slice(0, 4).join(' | ')));
+    chip.addEventListener('click', () => selectPickCandidate(candidate));
+    listBox.appendChild(chip);
+  });
+}
+
+async function openPicker() {
+  if (source === 'image') {
+    notice('图片识别不需要可视化点选。', 'error');
+    return;
+  }
+  if (source === 'url' && !$('url').value.trim()) {
+    notice('请先填写网页 URL。', 'error');
+    return;
+  }
+  if (source === 'html' && $('html').value.trim().length < 20) {
+    notice('请先粘贴 HTML 内容。', 'error');
+    return;
+  }
+  $('pick-modal').hidden = false;
+  document.body.classList.add('modal-open');
+  $('pick-loading').hidden = false;
+  $('pick-loading').textContent = '正在生成安全快照…';
+  $('pick-meta').textContent = '';
+  $('pick-selection').textContent = '尚未选择';
+  $('pick-selection').className = 'pick-selection muted';
+  $('pick-tables').textContent = '';
+  $('pick-lists').textContent = '';
+  $('pick-table-count').textContent = '';
+  $('pick-list-count').textContent = '';
+  pickSetEnabled(false);
+  pickState.data = null;
+  pickState.rule = null;
+
+  const request = currentRequest({ forAnalyze: true });
+  try {
+    const data = await api('/api/snapshot', {
+      method: 'POST',
+      body: {
+        source: request.source,
+        url: request.url,
+        html: request.html,
+        base_url: request.base_url,
+        browser: request.browser,
+        ignore_robots: request.ignore_robots,
+        wait_for: request.wait_for,
+        scan_full_page: request.scan_full_page,
+        expand_clicks: request.expand_clicks,
+        cache_mode: request.cache_mode,
+        reveal_hidden: true,
+      },
+    });
+    pickState.data = data;
+    $('pick-meta').textContent =
+      `${data.title || '（无标题）'} · ${data.final_url}` +
+      (data.tables.length ? ` · 表格 ${data.tables.length}` : '') +
+      (data.lists.length ? ` · 列表 ${data.lists.length}` : '');
+    renderPickCandidates(data);
+    loadPickFrame(data.snapshot_html);
+  } catch (error) {
+    cantRenderPick(error.message);
+  }
+}
+
+function closePicker() {
+  $('pick-modal').hidden = true;
+  document.body.classList.remove('modal-open');
+  const frame = $('pick-frame');
+  frame.onload = null;
+  try { frame.src = 'about:blank'; } catch { /* 忽略 */ }
+  if (pickState.blobUrl) {
+    URL.revokeObjectURL(pickState.blobUrl);
+    pickState.blobUrl = '';
+  }
+  pickState.data = null;
+  pickState.rule = null;
+  pickState.bound = false;
+}
+
+function applyPick(andRun) {
+  if (!pickState.rule) {
+    notice('请先在快照中选择一个表格或列表。', 'error');
+    return;
+  }
+  if (!applyRuleToForm(pickState.rule)) {
+    notice('规则不完整，无法套用。', 'error');
+    return;
+  }
+  closePicker();
+  if (andRun) {
+    notice('已套用可视化规则，正在开始抓取…', 'ok');
+    startJob();
+  } else {
+    notice('已把规则套用到高级设置，确认后点击「开始抓取」。', 'ok');
+  }
+}
+
 /* ------------------------------------------------------------------ 启动 */
 async function boot() {
   let me;
@@ -556,6 +1228,20 @@ async function boot() {
   $('add-field').addEventListener('click', () => addField());
   $('analyze').addEventListener('click', analyzePage);
   $('run').addEventListener('click', startJob);
+  $('visual-pick').addEventListener('click', openPicker);
+  $('pick-close').addEventListener('click', closePicker);
+  $('pick-apply').addEventListener('click', () => applyPick(false));
+  $('pick-run').addEventListener('click', () => applyPick(true));
+  $('pick-save').addEventListener('click', () => saveTemplateFlow(pickState.rule));
+  $('apply-template').addEventListener('click', applySelectedTemplate);
+  $('delete-template').addEventListener('click', deleteSelectedTemplate);
+  $('save-template').addEventListener('click', () => saveTemplateFlow());
+  $('pick-modal').addEventListener('click', (event) => {
+    if (event.target === $('pick-modal')) closePicker();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('pick-modal').hidden) closePicker();
+  });
   $('refresh-history').addEventListener('click', loadHistory);
   $('logout').addEventListener('click', async () => {
     try {
@@ -609,6 +1295,7 @@ async function boot() {
   addField('链接', 'a', 'href');
   switchMode('auto');
   loadHistory();
+  loadTemplates();
 }
 
 boot();

@@ -110,6 +110,24 @@
         浏览器渲染时滚动整页，触发懒加载 / 虚拟列表
       </label>
 
+      <label class="check">
+        <input id="expand-clicks" type="checkbox">
+        浏览器渲染时自动点击「展开 / 加载更多 / 查看全部」按钮
+      </label>
+
+      <div class="template-bar">
+        <label class="label" for="template-select">规则模板</label>
+        <div class="row">
+          <select id="template-select">
+            <option value="">（未选择模板）</option>
+          </select>
+          <button class="ghost small" id="apply-template" type="button">套用</button>
+          <button class="ghost small" id="delete-template" type="button">删除</button>
+          <button class="ghost small" id="save-template" type="button">保存当前规则</button>
+        </div>
+        <p class="hint">模板保存在本地数据库，记录提取规则而不是数据，可跨任务复用。</p>
+      </div>
+
       <div id="table-options" class="option-block">
         <div class="grid2">
           <div>
@@ -178,6 +196,10 @@
       </label>
       </details>
 
+      <button class="ghost wide" id="visual-pick" type="button">
+        可视化点选：在快照上点击表格 / 列表，自动生成规则
+      </button>
+
       <div class="actions">
         <button class="ghost" id="analyze" type="button">分析页面结构</button>
         <button class="primary" id="run" type="button">开始抓取</button>
@@ -221,6 +243,51 @@
     仅用于采集你有权访问的公开数据；请遵守目标站点服务条款、robots.txt 与当地法律法规。
   </footer>
 </div>
+
+<div id="pick-modal" class="modal" hidden>
+  <div class="modal-card">
+    <header class="modal-head">
+      <div>
+        <strong>可视化点选</strong>
+        <small id="pick-meta" class="muted"></small>
+      </div>
+      <button class="ghost small" id="pick-close" type="button">关闭</button>
+    </header>
+    <div class="modal-body">
+      <div class="pick-preview">
+        <iframe id="pick-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer"
+                title="页面快照预览"></iframe>
+        <div id="pick-loading" class="pick-loading">正在生成安全快照…</div>
+      </div>
+      <aside class="pick-side">
+        <p class="pick-hint">
+          点击快照中的 <b>表格</b> 或 <b>重复列表项</b>，会自动生成条目选择器与字段；
+          也可以直接点击下面的候选规则。
+        </p>
+        <div class="pick-section">
+          <h3>表格候选 <span id="pick-table-count" class="muted small"></span></h3>
+          <div id="pick-tables" class="pick-chips"></div>
+        </div>
+        <div class="pick-section">
+          <h3>列表候选 <span id="pick-list-count" class="muted small"></span></h3>
+          <div id="pick-lists" class="pick-chips"></div>
+        </div>
+        <div class="pick-section">
+          <h3>当前选择</h3>
+          <div id="pick-selection" class="pick-selection muted">尚未选择</div>
+          <div class="row">
+            <button class="ghost small" id="pick-apply" type="button" disabled>套用到表单</button>
+            <button class="primary small" id="pick-run" type="button" disabled>套用并开始抓取</button>
+          </div>
+          <div class="row">
+            <button class="ghost small" id="pick-save" type="button" disabled>保存为模板</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

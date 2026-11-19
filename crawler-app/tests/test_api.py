@@ -103,7 +103,7 @@ def test_html_job_flow_and_exports(settings):
         payload = metrics.json()
         assert payload["cache"]["enabled"] is True
         assert payload["jobs"]["total"] >= 1
-        assert payload["version"] == "1.1.0"
+        assert payload["version"] == "1.2.0"
 
         assert client.get(f"/api/jobs/{job_id}/export?format=docx").status_code == 400
 
@@ -155,3 +155,29 @@ def test_ssrf_url_rejected(settings):
         )
         assert response.status_code == 400
         assert "内网" in response.text or "SSRF" in response.text
+
+
+def test_snapshot_api_from_html_source(settings):
+    app = create_app(settings)
+    with TestClient(app) as client:
+        csrf = login(client)
+        response = client.post(
+            "/api/snapshot",
+            json={
+                "source": "html",
+                "html": SAMPLE_HTML,
+                "base_url": "https://example.com/list/",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["title"] == "示例商品列表"
+        assert data["final_url"] == "https://example.com/list/"
+        assert data["snapshot_html"].startswith("<!DOCTYPE html>")
+        assert '<base href="https://example.com/list/"' in data["snapshot_html"]
+        assert data["tables"][0]["headers"] == ["名称", "价格", "库存"]
+        assert data["tables"][0]["rule"]["fields"][0]["selector"] == "td:nth-child(1)"
+        assert data["detected"]["mode"] in {"table", "css", "article", "structured"}
+        assert data["schema"]
+

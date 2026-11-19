@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,23 @@ def init_db(db_path: Path) -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                source_url TEXT,
+                rule TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_templates_updated "
+            "ON templates(updated_at DESC)"
         )
 
 
@@ -156,3 +174,69 @@ def job_stats(db_path: Path) -> dict:
         "by_status": by_status,
         "total_rows": sum(int(row["rows"]) for row in rows),
     }
+
+
+# ---------------------------------------------------------------- 规则模板
+def _template_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"] or "",
+        "source_url": row["source_url"] or "",
+        "rule": json.loads(row["rule"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_templates(db_path: Path, limit: int = 100) -> list[dict]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM templates ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+            (max(1, min(limit, 200)),),
+        ).fetchall()
+    return [_template_row(row) for row in rows]
+
+
+def get_template(db_path: Path, template_id: str) -> dict | None:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM templates WHERE id=?", (template_id,)
+        ).fetchone()
+    return _template_row(row) if row else None
+
+
+def save_template(
+    db_path: Path,
+    *,
+    name: str,
+    rule: dict,
+    description: str = "",
+    source_url: str = "",
+    template_id: str | None = None,
+) -> dict:
+    now = _now()
+    payload = json.dumps(rule, ensure_ascii=False)
+    with _LOCK, _connect(db_path) as conn:
+        if template_id:
+            cursor = conn.execute(
+                """UPDATE templates SET name=?, description=?, source_url=?,
+                   rule=?, updated_at=? WHERE id=?""",
+                (name, description, source_url, payload, now, template_id),
+            )
+            if cursor.rowcount == 0:
+                template_id = None
+        if not template_id:
+            template_id = uuid.uuid4().hex[:12]
+            conn.execute(
+                """INSERT INTO templates (id, name, description, source_url, rule,
+                   created_at, updated_at) VALUES (?,?,?,?,?,?,?)""",
+                (template_id, name, description, source_url, payload, now, now),
+            )
+    return get_template(db_path, template_id)  # type: ignore[return-value]
+
+
+def delete_template(db_path: Path, template_id: str) -> bool:
+    with _LOCK, _connect(db_path) as conn:
+        cursor = conn.execute("DELETE FROM templates WHERE id=?", (template_id,))
+    return cursor.rowcount > 0

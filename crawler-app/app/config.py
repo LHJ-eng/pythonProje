@@ -74,6 +74,7 @@ class Settings:
     # 浏览器渲染
     browser_block_resources: bool = True
     browser_scroll_steps: int = 6
+    browser_expand_clicks: int = 5
     # 深度抓取上限
     deep_max_pages: int = 50
     cache: HttpCache | None = field(
@@ -177,6 +178,7 @@ def load_settings() -> Settings:
         retry_backoff=float(os.getenv("RETRY_BACKOFF", "0.6")),
         browser_block_resources=_env_bool("BROWSER_BLOCK_RESOURCES", True),
         browser_scroll_steps=int(os.getenv("BROWSER_SCROLL_STEPS", "6")),
+        browser_expand_clicks=int(os.getenv("BROWSER_EXPAND_CLICKS", "5")),
         deep_max_pages=int(os.getenv("DEEP_MAX_PAGES", "50")),
         user_agent=os.getenv("USER_AGENT", "").strip()
         or Settings.__dataclass_fields__["user_agent"].default,

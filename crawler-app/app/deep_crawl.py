@@ -149,6 +149,7 @@ async def crawl_deep(
     delay: float = 0.0,
     wait_for: str | None = None,
     scan_full_page: bool = True,
+    expand_clicks: int = 0,
 ) -> DeepCrawlResult:
     """同域 BFS 抓取，返回按发现顺序排列的页面结果。"""
     include_re = compile_pattern(include)
@@ -185,6 +186,7 @@ async def crawl_deep(
                 allow_image=False,
                 wait_for=wait_for,
                 scan_full_page=scan_full_page,
+                expand_clicks=expand_clicks,
             )
         except (FetchError, InvalidURLError, ValueError) as exc:
             result.errors.append(f"{url}：{exc}")
