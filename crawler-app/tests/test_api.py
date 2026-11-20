@@ -103,7 +103,7 @@ def test_html_job_flow_and_exports(settings):
         payload = metrics.json()
         assert payload["cache"]["enabled"] is True
         assert payload["jobs"]["total"] >= 1
-        assert payload["version"] == "1.2.0"
+        assert payload["version"] == "1.3.0"
 
         assert client.get(f"/api/jobs/{job_id}/export?format=docx").status_code == 400
 

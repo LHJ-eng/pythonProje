@@ -88,16 +88,20 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _auto_payload(html: str, base_url: str) -> dict:
+def _auto_payload(html: str, base_url: str, json_payloads: list | None = None) -> dict:
     """智能识别摘要 + 可复用 schema，供快照端点附带返回。"""
     try:
-        extraction, detected = extract_auto(html, base_url)
+        extraction, detected = extract_auto(
+            html, base_url, json_payloads=json_payloads
+        )
         return {
             "detected": {
                 **detected,
                 "rows": len(extraction.rows),
                 "columns": extraction.columns,
                 "preview": extraction.rows[:3],
+                "quality": extraction.quality,
+                "warnings": extraction.warnings,
             },
             "schema": build_schema(
                 extraction, detected, source_url=base_url
@@ -154,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         print("请登录后在 .env 中设置 APP_PASSWORD，并删除初始密码文件。")
         print("=" * 64)
 
-    app = FastAPI(title="DataHarvester", version="1.2.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DataHarvester", version="1.3.0", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.limiter = LoginRateLimiter()
     app.state.runner = JobRunner(settings)
@@ -191,13 +195,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "1.2.0"}
+        return {"status": "ok", "version": "1.3.0"}
 
     @app.get("/api/metrics")
     async def metrics(session: dict = Depends(require_auth)):
         cache_stats = settings.cache.stats() if settings.cache else {"enabled": False}
         return {
-            "version": "1.2.0",
+            "version": "1.3.0",
             "jobs": storage.job_stats(settings.db_path),
             "cache": cache_stats,
             "settings": {
@@ -331,7 +335,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "links": 0,
                         "chars": len(result.body),
                     }
-                return analyze_page(result.html, result.url)
+                return analyze_page(
+                    result.html, result.url, json_payloads=result.json_payloads
+                )
         except (FetchError, InvalidURLError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ExtractionError as exc:
@@ -347,6 +353,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             html = body.html
             base_url = body.base_url or "https://example.com/"
             final_url, via, status, elapsed = base_url, "html", 200, 0
+            json_payloads: list = []
         else:
             try:
                 url = validate_url(
@@ -378,11 +385,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             base_url = result.url
             final_url, via = result.url, result.via
             status, elapsed = result.status, result.elapsed_ms
+            json_payloads = result.json_payloads
 
         payload = build_snapshot(
             html, base_url, reveal_hidden=body.reveal_hidden
         )
-        payload.update(_auto_payload(html, base_url))
+        payload.update(_auto_payload(html, base_url, json_payloads))
         payload.update(
             final_url=final_url, via=via, status=status, elapsed_ms=elapsed
         )

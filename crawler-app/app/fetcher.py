@@ -6,7 +6,7 @@ import asyncio
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urljoin
@@ -20,6 +20,8 @@ from .security import InvalidURLError, validate_url
 
 MAX_REDIRECTS = 5
 MAX_IMAGE_BYTES = 10_000_000
+MAX_JSON_BYTES = 2_000_000
+MAX_JSON_PAYLOADS = 20
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 _IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _FEED_CONTENT_TYPES = {
@@ -55,6 +57,7 @@ class FetchResult:
     body: bytes = b""
     from_cache: bool = False
     retries: int = 0
+    json_payloads: list = field(default_factory=list)
 
 
 def _decode_body(body: bytes, content_type: str) -> str:
@@ -235,6 +238,31 @@ async def _read_limited(response: httpx.Response, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _capture_json_response(response, sink: list) -> None:
+    """把 XHR / fetch 返回的 JSON 响应收集起来，供后续结构化提取使用。"""
+    if len(sink) >= MAX_JSON_PAYLOADS:
+        return
+    try:
+        request = response.request
+        if request.resource_type not in {"xhr", "fetch"}:
+            return
+        if response.status >= 400:
+            return
+        content_type = (response.headers or {}).get("content-type", "")
+        if "json" not in content_type.lower():
+            return
+        body = response.body()
+        if not body or len(body) > MAX_JSON_BYTES:
+            return
+        import json
+
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except Exception:
+        return
+    if isinstance(payload, (dict, list)):
+        sink.append(payload)
+
+
 def _fetch_with_browser(
     url: str,
     settings: Settings,
@@ -242,8 +270,11 @@ def _fetch_with_browser(
     wait_for: str | None = None,
     scan_full_page: bool = True,
     expand_clicks: int = 0,
-) -> str:
-    """同步 Playwright 调用，放在线程中执行，避免阻塞事件循环。"""
+) -> tuple[str, list]:
+    """同步 Playwright 调用，放在线程中执行，避免阻塞事件循环。
+
+    返回 (渲染后的 HTML, 捕获到的网络 JSON 响应列表)。
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -260,6 +291,11 @@ def _fetch_with_browser(
                     viewport={"width": 1366, "height": 900},
                 )
                 page = context.new_page()
+                json_payloads: list = []
+                page.on(
+                    "response",
+                    lambda response: _capture_json_response(response, json_payloads),
+                )
                 # 拦截图片 / 字体 / 媒体资源，显著加快动态页渲染
                 if settings.browser_block_resources:
                     def _route(route):
@@ -354,7 +390,7 @@ def _fetch_with_browser(
                     except Exception:
                         pass
                 page.wait_for_timeout(500)
-                return page.content()
+                return page.content(), json_payloads
             finally:
                 browser.close()
     except FetchError:
@@ -490,8 +526,9 @@ async def fetch_url(
         )
 
     via = "http"
+    json_payloads: list = []
     if browser and kind == "html":
-        html = await asyncio.to_thread(
+        html, json_payloads = await asyncio.to_thread(
             _fetch_with_browser,
             final_url,
             settings,
@@ -511,4 +548,5 @@ async def fetch_url(
         kind=kind,
         body=body if kind == "image" else b"",
         retries=retries,
+        json_payloads=json_payloads,
     )

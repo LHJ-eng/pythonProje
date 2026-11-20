@@ -17,12 +17,60 @@ class ExtractionError(ValueError):
     """选择器错误、未找到表格/条目等。"""
 
 
+def _quality(columns: list[str], rows: list[list[str]]) -> dict:
+    """计算提取质量与置信度，帮助用户判断是否需要调整规则。"""
+    row_count = len(rows)
+    col_count = len(columns)
+    if not row_count or not col_count:
+        return {
+            "rows": row_count,
+            "columns": col_count,
+            "field_coverage": {},
+            "average_field_coverage": 0.0,
+            "row_completeness": 0.0,
+            "confidence": 0.0,
+            "empty_cells": 0,
+        }
+    field_coverage: dict[str, float] = {}
+    nonempty = 0
+    for index, column in enumerate(columns):
+        hit = sum(
+            1 for row in rows
+            if index < len(row) and str(row[index]).strip()
+        )
+        field_coverage[column] = round(hit / row_count, 3)
+        nonempty += hit
+    total = row_count * col_count
+    coverage = nonempty / total
+    row_completeness = sum(
+        sum(1 for cell in row if str(cell).strip()) / max(len(row), 1)
+        for row in rows
+    ) / row_count
+    average_field = sum(field_coverage.values()) / col_count
+    confidence = (
+        0.45 * coverage
+        + 0.25 * row_completeness
+        + 0.15 * min(row_count / 5, 1)
+        + 0.15 * min(col_count / 3, 1)
+    )
+    return {
+        "rows": row_count,
+        "columns": col_count,
+        "field_coverage": field_coverage,
+        "average_field_coverage": round(average_field, 3),
+        "row_completeness": round(row_completeness, 3),
+        "confidence": round(min(confidence, 1.0), 3),
+        "empty_cells": total - nonempty,
+    }
+
+
 @dataclass
 class TableData:
     index: int
     headers: list[str]
     rows: list[list[str]]
     has_thead: bool
+    header_rows: int = 0
 
 
 @dataclass
@@ -30,6 +78,23 @@ class Extraction:
     columns: list[str]
     rows: list[list[str]]
     warnings: list[str] = field(default_factory=list)
+    quality: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.quality:
+            self.quality = _quality(self.columns, self.rows)
+
+
+def _low_coverage_warning(extraction: Extraction) -> None:
+    """字段命中率过低时提示用户，避免拿到一堆空列还以为抓取成功。"""
+    coverage = extraction.quality.get("field_coverage") or {}
+    low = [name for name, ratio in coverage.items() if ratio < 0.5]
+    if not low:
+        return
+    extraction.warnings = (
+        extraction.warnings
+        + [f"字段命中率偏低：{'、'.join(low[:5])}，可检查选择器或开启浏览器渲染"]
+    )[:12]
 
 
 def make_soup(html: str) -> BeautifulSoup:
@@ -75,59 +140,139 @@ def _cell_value(cell) -> str:
     return _collapse(cell.get_text(" ", strip=True))
 
 
-def _row_cells(tr) -> list[tuple[str, int]]:
-    cells: list[tuple[str, int]] = []
-    for cell in tr.find_all(["td", "th"], recursive=False):
-        try:
-            colspan = min(int(cell.get("colspan", 1)), 50)
-        except (TypeError, ValueError):
-            colspan = 1
-        cells.append((_cell_value(cell), max(colspan, 1)))
-    return cells
+def _span(cell, name: str) -> int:
+    try:
+        return max(1, min(int(cell.get(name, 1)), 50))
+    except (TypeError, ValueError):
+        return 1
+
+
+def table_matrix(table) -> tuple[list[str], list[list[str]], int, str, bool]:
+    """把表格还原为二维网格，正确处理 rowspan / colspan 与多行表头。
+
+    返回 (表头, 数据行, 表头行数, 数据单元格标签, 是否检测到表头)。
+    """
+    rows_nodes = [
+        tr for tr in table.find_all("tr")
+        if tr.find_parent("table") is table
+    ]
+    grid: list[list[str]] = []
+    pending: dict[int, list] = {}
+    for tr in rows_nodes:
+        row: list[str] = []
+        col = 0
+
+        def fill_pending() -> None:
+            nonlocal col
+            while col in pending:
+                value, remaining = pending[col]
+                row.append(value)
+                if remaining <= 1:
+                    del pending[col]
+                else:
+                    pending[col] = [value, remaining - 1]
+                col += 1
+
+        fill_pending()
+        for cell in tr.find_all(["td", "th"], recursive=False):
+            fill_pending()
+            value = _cell_value(cell)
+            colspan = _span(cell, "colspan")
+            rowspan = _span(cell, "rowspan")
+            for offset in range(colspan):
+                row.append(value)
+                if rowspan > 1:
+                    pending[col + offset] = [value, rowspan - 1]
+            col += colspan
+        # 补齐行尾仍然生效的 rowspan 单元格（不删除更靠前、属于下一行的挂起单元格）
+        col = len(row)
+        while True:
+            future = [position for position in pending if position >= col]
+            if not future:
+                break
+            next_col = min(future)
+            row.extend([""] * (next_col - col))
+            col = next_col
+            fill_pending()
+            col = len(row)
+        grid.append(row)
+
+    if not grid:
+        return [], [], 0, "td", False
+    width = max(len(row) for row in grid)
+    if width == 0:
+        return [], [], 0, "td", False
+    for row in grid:
+        row.extend([""] * (width - len(row)))
+
+    thead_rows = [
+        tr for tr in rows_nodes
+        if tr.find_parent("thead") is not None
+    ]
+    header_count = len(thead_rows)
+    source = "thead" if header_count else "none"
+    if not header_count and rows_nodes:
+        first_cells = rows_nodes[0].find_all(["td", "th"], recursive=False)
+        if first_cells:
+            th_ratio = sum(1 for cell in first_cells if cell.name == "th") / len(first_cells)
+            if th_ratio >= 0.6:
+                header_count = 1
+                source = "th"
+                if len(rows_nodes) > 1:
+                    second_cells = rows_nodes[1].find_all(
+                        ["td", "th"], recursive=False
+                    )
+                    if second_cells and (
+                        sum(1 for cell in second_cells if cell.name == "th")
+                        / len(second_cells)
+                        >= 0.6
+                    ):
+                        header_count = 2
+    header_count = max(0, min(header_count, len(grid)))
+
+    if header_count:
+        raw_headers: list[str] = []
+        for column in range(width):
+            values: list[str] = []
+            for row_index in range(header_count):
+                value = grid[row_index][column]
+                if value and (not values or values[-1] != value):
+                    values.append(value)
+            raw_headers.append(" ".join(values))
+        headers = _unique_columns(raw_headers)
+    else:
+        headers = [f"列{index + 1}" for index in range(width)]
+
+    body = [row for row in grid[header_count:] if any(cell.strip() for cell in row)]
+    first_body_cells = []
+    if header_count < len(rows_nodes):
+        first_body_cells = rows_nodes[header_count].find_all(
+            ["td", "th"], recursive=False
+        )
+    cell_tag = (
+        "td"
+        if not first_body_cells or any(cell.name == "td" for cell in first_body_cells)
+        else "th"
+    )
+    return headers, body, header_count, cell_tag, header_count > 0
 
 
 def parse_tables(html: str) -> list[TableData]:
     soup = make_soup(html)
     result: list[TableData] = []
-    for index, table in enumerate(soup.find_all("table")):
+    for table in soup.find_all("table"):
         if table.find_parent("table") is not None:
             continue  # 跳过嵌套表格，避免重复
-        thead = table.find("thead")
-        header_row = None
-        if thead:
-            tr = thead.find("tr")
-            if tr:
-                header_row = [value for value, span in _row_cells(tr) for _ in range(span)]
-
-        body_rows = []
-        for tr in table.find_all("tr"):
-            if thead and tr.find_parent("thead") is not None:
-                continue
-            cells = _row_cells(tr)
-            if cells:
-                body_rows.append([value for value, span in cells for _ in range(span)])
-
-        if header_row is None and body_rows:
-            first_tr = table.find("tr")
-            if first_tr and first_tr.find("th") and first_tr.find_parent("thead") is None:
-                header_row = body_rows.pop(0)
-                if not any(header_row):
-                    header_row = None
-        if not body_rows:
+        headers, body, header_rows, _, has_thead = table_matrix(table)
+        if not body or not headers:
             continue
-        width = max(len(row) for row in [header_row or []] + body_rows)
-        if width == 0:
-            continue
-        headers = _unique_columns(
-            list(header_row or []) + [""] * max(0, width - len(header_row or []))
-        ) if header_row else [f"列{i + 1}" for i in range(width)]
-        normalized = [row + [""] * (width - len(row)) for row in body_rows]
         result.append(
             TableData(
                 index=len(result),
                 headers=headers,
-                rows=normalized,
-                has_thead=header_row is not None,
+                rows=body,
+                has_thead=has_thead,
+                header_rows=header_rows,
             )
         )
     return result
@@ -222,11 +367,30 @@ def extract_css(
             rows.append(row)
     if not rows:
         raise ExtractionError("匹配到条目，但所有字段都是空的，请检查字段选择器")
-    return Extraction(columns=columns, rows=rows, warnings=warnings[:10])
+    extraction = Extraction(columns=columns, rows=rows, warnings=warnings[:10])
+    _low_coverage_warning(extraction)
+    return extraction
 
 
-def _css_field_value(item, selector: str, attr: str, base_url: str) -> str:
-    """按 CSS 选择器从条目中取值（支持 @属性、text、html 与常用链接属性）。"""
+_CLASS_PART = re.compile(r"\.[-_a-zA-Z][-_a-zA-Z0-9]*")
+
+
+def _relax_selector(selector: str) -> str:
+    """去掉选择器里的 class，用于字段选择器失效时的保守回退。"""
+    relaxed = _CLASS_PART.sub("", selector or "")
+    relaxed = re.sub(r"\s+", " ", relaxed).strip()
+    return relaxed.strip(" >+~")
+
+
+def _css_field_value(
+    item, selector: str, attr: str, base_url: str, *, relax: bool = True
+) -> str:
+    """按 CSS 选择器从条目中取值（支持 @属性、text、html 与常用链接属性）。
+
+    字段为空时做保守自愈：去掉 class 后在条目内唯一命中才采用；
+    链接 / 图片字段在条目内恰有一个带该属性的节点时回退到该节点，
+    避免站点改版把 class 换掉后整列变成空值。
+    """
     value = ""
     node = None
     if not selector:
@@ -238,6 +402,15 @@ def _css_field_value(item, selector: str, attr: str, base_url: str) -> str:
         node = item.select_one(selector)
         if node is None and item is not None and _matches(item, selector):
             node = item
+        if node is None and relax:
+            relaxed = _relax_selector(selector)
+            if relaxed and relaxed != selector:
+                try:
+                    candidates = item.select(relaxed)
+                except Exception:
+                    candidates = []
+                if len(candidates) == 1:
+                    node = candidates[0]
     if node is not None and not value:
         if attr == "text":
             value = _collapse(node.get_text(" ", strip=True))
@@ -247,6 +420,18 @@ def _css_field_value(item, selector: str, attr: str, base_url: str) -> str:
             value = node.get(attr, "") or ""
             if attr in {"href", "src", "poster"} and value:
                 value = urljoin(base_url, value)
+    if not value and relax and attr in {"href", "src"}:
+        tag_name = "a" if attr == "href" else "img"
+        try:
+            candidates = [
+                node
+                for node in item.select(f"{tag_name}[{attr}]")
+                if str(node.get(attr) or "").strip()
+            ]
+        except Exception:
+            candidates = []
+        if len(candidates) == 1:
+            value = urljoin(base_url, str(candidates[0].get(attr) or ""))
     return str(value or "")
 
 
@@ -367,7 +552,9 @@ def _extract_xpath(
             rows.append(row)
     if not rows:
         raise ExtractionError("匹配到条目，但所有字段都是空的，请检查字段选择器")
-    return Extraction(columns=columns, rows=rows, warnings=warnings[:10])
+    extraction = Extraction(columns=columns, rows=rows, warnings=warnings[:10])
+    _low_coverage_warning(extraction)
+    return extraction
 
 
 def _meta(soup: BeautifulSoup, *names: str) -> str:
@@ -1404,10 +1591,45 @@ def _best_auto_list(
     }
 
 
+def extract_json_payloads(
+    payloads: list, base_url: str
+) -> tuple[Extraction, dict] | None:
+    """从浏览器运行时捕获的 XHR / fetch JSON 响应中识别记录列表。
+
+    很多动态页把真实数据放在接口响应里，渲染后的 DOM 只是其中一部分；
+    直接解析接口数据通常比从 DOM 猜结构更准确。
+    """
+    best = None
+    for payload in payloads[:20]:
+        for score, records in _record_lists(payload):
+            extraction = _records_to_extraction(records, base_url)
+            if extraction and (best is None or score > best[0]):
+                best = (score, extraction, len(records))
+    if best is None:
+        return None
+    score, extraction, count = best
+    return extraction, {
+        "mode": "network",
+        "score": round(min(score + 0.03, 0.95), 3),
+        "reason": f"浏览器网络 JSON：{count} 条记录",
+    }
+
+
 def extract_auto(
-    html: str, base_url: str, rule: dict | None = None, *, browser_rendered: bool = False
+    html: str,
+    base_url: str,
+    rule: dict | None = None,
+    *,
+    browser_rendered: bool = False,
+    json_payloads: list | None = None,
 ) -> tuple[Extraction, dict]:
     """智能识别表格、重复列表或正文；后续页可复用第一页规则。"""
+    if rule and rule.get("mode") == "network":
+        network = extract_json_payloads(json_payloads or [], base_url)
+        if network is not None:
+            return network[0], rule
+        rule = None  # 后续页没有捕获到网络数据，退化为自动识别
+
     if rule:
         mode = rule.get("mode")
         if mode == "table":
@@ -1489,6 +1711,15 @@ def extract_auto(
     if structured_candidate:
         candidates.append(structured_candidate)
 
+    network_candidate = None
+    if json_payloads:
+        try:
+            network_candidate = extract_json_payloads(json_payloads, base_url)
+        except Exception:
+            network_candidate = None
+        if network_candidate:
+            candidates.append(network_candidate)
+
     article_candidate = None
     article_score = 0.0
     try:
@@ -1521,7 +1752,7 @@ def extract_auto(
         browser_rendered
         and best_structured
         and best_structured[1]["score"] >= 0.40
-        and (list_candidate or structured_candidate)
+        and (list_candidate or structured_candidate or network_candidate)
     ):
         # 渲染页：列表/结构化分数超过 0.4 即优先，避免正文把列表数据吞掉
         extraction, detected = best_structured
@@ -1552,6 +1783,7 @@ def extract_auto(
         "table": table_candidate[1]["score"] if table_candidate else 0,
         "list": list_candidate[1]["score"] if list_candidate else 0,
         "structured": structured_candidate[1]["score"] if structured_candidate else 0,
+        "network": network_candidate[1]["score"] if network_candidate else 0,
         "article": round(article_score, 3),
     }
     if low_confidence:
@@ -1666,7 +1898,7 @@ def build_schema(
     }
 
 
-def analyze_page(html: str, url: str) -> dict:
+def analyze_page(html: str, url: str, *, json_payloads: list | None = None) -> dict:
     """返回页面结构摘要，供前端选择表格 / 预览正文。"""
     soup = make_soup(html)
     tables = parse_tables(html)
@@ -1681,13 +1913,17 @@ def analyze_page(html: str, url: str) -> dict:
 
     schema = None
     try:
-        auto_extraction, auto_rule = extract_auto(html, url)
+        auto_extraction, auto_rule = extract_auto(
+            html, url, json_payloads=json_payloads
+        )
         schema = build_schema(auto_extraction, auto_rule, source_url=url)
         auto_summary = {
             **auto_rule,
             "rows": len(auto_extraction.rows),
             "columns": auto_extraction.columns,
             "preview": auto_extraction.rows[:3],
+            "quality": auto_extraction.quality,
+            "warnings": auto_extraction.warnings,
         }
     except ExtractionError as exc:
         auto_summary = {"mode": None, "error": str(exc)}
@@ -1710,6 +1946,7 @@ def analyze_page(html: str, url: str) -> dict:
                 "rows": len(t.rows),
                 "cols": len(t.headers),
                 "headers": t.headers[:30],
+                "header_rows": t.header_rows,
                 "preview": t.rows[:5],
             }
             for t in tables

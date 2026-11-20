@@ -98,3 +98,31 @@ def test_build_snapshot_returns_title_and_candidates():
     assert '<base href="https://example.com/list/"' in data["snapshot_html"]
     assert data["source_chars"] > 0
     assert data["snapshot_chars"] > 0
+
+
+MERGED_TABLE_HTML = """
+<html><body>
+<table>
+  <thead>
+    <tr><th rowspan="2">姓名</th><th colspan="2">成绩</th></tr>
+    <tr><th>数学</th><th>语文</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>张三</td><td>90</td><td>80</td></tr>
+    <tr><td>李四</td><td>70</td><td>60</td></tr>
+  </tbody>
+</table>
+</body></html>
+"""
+
+
+def test_table_candidates_handle_merged_headers():
+    candidates = table_candidates(MERGED_TABLE_HTML)
+    assert candidates
+    table = candidates[0]
+    assert table["headers"] == ["姓名", "成绩 数学", "成绩 语文"]
+    assert table["rows"] == 2
+    assert table["cols"] == 3
+    assert table["sample"][0] == ["张三", "90", "80"]
+    assert "tbody" in table["item_selector"]
+    assert table["rule"]["fields"][1]["selector"] == "td:nth-child(2)"

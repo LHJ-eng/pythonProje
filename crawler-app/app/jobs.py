@@ -255,6 +255,7 @@ class JobRunner:
                     },
                     "ocr": ocr_meta,
                     "image_name": request.image_name,
+                    "quality": extraction.quality,
                 }
             )
             return extraction, meta
@@ -265,6 +266,7 @@ class JobRunner:
             extraction, detected = self._extract_one(html, base, request)
             meta["pages_fetched"] = 1
             meta["resolved_mode"] = detected["mode"] if detected else request.mode
+            meta["quality"] = extraction.quality
             if detected:
                 meta["auto_detection"] = detected
             return extraction, meta
@@ -346,6 +348,7 @@ class JobRunner:
                             page=page,
                             auto_rule=auto_rule,
                             browser_rendered=result.via == "browser",
+                            json_payloads=result.json_payloads,
                         )
                     except (ExtractionError, ValueError):
                         if not (
@@ -381,6 +384,7 @@ class JobRunner:
                             request,
                             page=page,
                             browser_rendered=True,
+                            json_payloads=result.json_payloads,
                         )
                 if first is not None and extraction.columns != first.columns:
                     raise ExtractionError("识别列与第一页不一致，为避免数据错位已停止")
@@ -393,6 +397,7 @@ class JobRunner:
                 first = extraction
                 source_kind = result.kind
                 meta["resolved_mode"] = detected["mode"] if detected else request.mode
+                meta["quality"] = extraction.quality
                 if detected:
                     meta["auto_detection"] = detected
                     meta["schema"] = build_schema(
@@ -468,6 +473,7 @@ class JobRunner:
                     page=index,
                     auto_rule=auto_rule,
                     browser_rendered=result.via == "browser",
+                    json_payloads=result.json_payloads,
                 )
             except (ExtractionError, ValueError) as exc:
                 warnings.append(f"{page.url} 解析失败：{exc}")
@@ -501,6 +507,7 @@ class JobRunner:
             {
                 "pages_fetched": fetched,
                 "fetch_ms": fetch_ms,
+                "quality": output.quality,
                 "deep_pages": [
                     {"url": page.url, "depth": page.depth, "error": page.error}
                     for page in crawled.pages
@@ -562,6 +569,7 @@ class JobRunner:
                     request,
                     page=1,
                     browser_rendered=framed.via == "browser",
+                    json_payloads=framed.json_payloads,
                 )
             except (ExtractionError, ValueError):
                 continue
@@ -592,10 +600,15 @@ class JobRunner:
         page: int = 1,
         auto_rule: dict | None = None,
         browser_rendered: bool = False,
+        json_payloads: list | None = None,
     ) -> tuple[Extraction, dict | None]:
         if request.mode == "auto":
             extraction, detected = extract_auto(
-                html, base_url, rule=auto_rule, browser_rendered=browser_rendered
+                html,
+                base_url,
+                rule=auto_rule,
+                browser_rendered=browser_rendered,
+                json_payloads=json_payloads,
             )
             if page > 1:
                 extraction.warnings.append("后续页复用第一页的智能识别规则")

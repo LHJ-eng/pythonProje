@@ -24,6 +24,7 @@ from .extractor import (
     _structure_signature,
     extract_css,
     make_soup,
+    table_matrix,
 )
 
 MAX_SNAPSHOT_CHARS = 2_000_000
@@ -248,96 +249,20 @@ def css_path(tag, soup) -> str:
     return " > ".join(reversed(segments)) or "body"
 
 
-def _unique_names(names: list[str]) -> list[str]:
-    seen: dict[str, int] = {}
-    result: list[str] = []
-    for index, raw in enumerate(names):
-        name = (_collapse(raw) or f"列{index + 1}")[:80]
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 0
-        result.append(name)
-    return result
-
-
-def _cell_text(cell) -> str:
-    for br in cell.find_all("br"):
-        br.replace_with(" ")
-    return _collapse(cell.get_text(" ", strip=True))
-
-
-def _row_values(tr) -> list[str]:
-    values: list[str] = []
-    for cell in tr.find_all(["td", "th"], recursive=False):
-        try:
-            colspan = min(int(cell.get("colspan", 1)), 50)
-        except (TypeError, ValueError):
-            colspan = 1
-        values.extend([_cell_text(cell)] * max(1, colspan))
-    return values
-
-
-def _own_rows(table) -> list:
-    rows = []
-    for tr in table.find_all("tr"):
-        if tr.find_parent("table") is table:
-            rows.append(tr)
-    return rows
-
-
 # ---------------------------------------------------------------- 表格候选
 def _table_rule(table, soup) -> dict:
     table_sel = css_path(table, soup)
-    thead = table.find("thead")
-    if thead is not None and thead.find_parent("table") is not table:
-        thead = None
-    own = _own_rows(table)
-
-    header_tr = None
-    if thead is not None:
-        for tr in thead.find_all("tr"):
-            if tr.find_parent("table") is table:
-                header_tr = tr
-                break
-
-    body_rows = [
-        tr for tr in own
-        if not (thead is not None and tr.find_parent("thead") is thead)
-    ]
-    header_from_body = False
-    if header_tr is None and body_rows:
-        first = body_rows[0]
-        if first.find("th") is not None:
-            header_tr = first
-            body_rows = body_rows[1:]
-        elif len(body_rows) >= 3:
-            header_tr = first
-            body_rows = body_rows[1:]
-            header_from_body = True
-
-    headers = _row_values(header_tr) if header_tr is not None else []
-    rows = [_row_values(tr) for tr in body_rows]
-    rows = [row for row in rows if any(row)]
-    width = max([len(headers)] + [len(row) for row in rows] or [0])
-    if width == 0:
+    headers, rows, header_rows, cell_tag, _ = table_matrix(table)
+    if not headers or not rows:
         return {}
-    headers = _unique_names(headers + [""] * (width - len(headers))) if headers else []
-    if not headers:
-        headers = [f"列{index + 1}" for index in range(width)]
+    width = len(headers)
     normalized = [row + [""] * (width - len(row)) for row in rows]
 
-    first_body = body_rows[0] if body_rows else None
-    uses_td = True
-    if first_body is not None:
-        uses_td = first_body.find("td") is not None
-    cell_tag = "td" if uses_td else "th"
-
-    if thead is not None and table.find("tbody") is not None:
+    if table.find("thead") is not None and table.find("tbody") is not None:
         item_selector = f"{table_sel} tbody tr"
-    elif header_from_body:
-        item_selector = f"{table_sel} tr + tr"
+    elif header_rows and table.find("thead") is None:
+        # 表头来自首行（th 或首行内容）：跳过表头行，避免被当作数据
+        item_selector = f"{table_sel} tr:nth-child(n+{header_rows + 1})"
     else:
         item_selector = f"{table_sel} tr"
 

@@ -204,11 +204,25 @@ function renderAnalysis(data) {
   selectedTableIndex = null;
 
   if (lastAutoRule && lastAutoRule.mode) {
-    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', structured: '页面结构化数据', feed: 'RSS / Atom 订阅源', ocr: '图片文字识别' };
+    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', structured: '页面结构化数据', network: '浏览器网络 JSON', feed: 'RSS / Atom 订阅源', ocr: '图片文字识别' };
     const card = node('div', 'auto-card');
     const score = lastAutoRule.score === undefined ? '' : ` · 置信度 ${Math.round(lastAutoRule.score * 100)}%`;
     card.appendChild(node('b', '', `智能识别：${labels[lastAutoRule.mode] || lastAutoRule.mode}${score}`));
     card.appendChild(node('div', 'preview-line', lastAutoRule.reason || '已自动确定提取方式'));
+    const quality = lastAutoRule.quality || {};
+    if (quality.confidence !== undefined) {
+      const coverageText = quality.average_field_coverage !== undefined
+        ? ` · 字段平均完整度 ${Math.round(quality.average_field_coverage * 100)}%` : '';
+      card.appendChild(node('div', 'preview-line',
+        `提取质量：置信度 ${Math.round(quality.confidence * 100)}%${coverageText}` +
+        ` · ${quality.rows || 0} 行 × ${quality.columns || 0} 列`));
+      const lowFields = Object.entries(quality.field_coverage || {})
+        .filter(([, ratio]) => Number(ratio) < 0.5)
+        .map(([name, ratio]) => `${name} ${Math.round(Number(ratio) * 100)}%`);
+      if (lowFields.length) {
+        card.appendChild(node('div', 'preview-line', `字段命中偏低：${lowFields.slice(0, 6).join('、')}`));
+      }
+    }
     if (lastAutoRule.columns && lastAutoRule.columns.length) {
       card.appendChild(node('div', 'preview-line', `字段：${lastAutoRule.columns.join(' | ')}`));
     }
@@ -323,11 +337,13 @@ function renderJob(job) {
     };
     const detection = meta.auto_detection || {};
     const ocr = meta.ocr || {};
+    const quality = meta.quality || detection.quality || {};
     const averageConfidence = ocr.average_confidence ?? ocr.avg_confidence;
     const parts = [
       `${job.total_rows} 行 × ${job.columns.length} 列`,
       viaLabels[meta.via] || '本地处理',
       detection.reason || '',
+      quality.confidence !== undefined ? `提取置信度 ${Math.round(quality.confidence * 100)}%` : '',
       averageConfidence !== undefined ? `OCR 平均置信度 ${(Number(averageConfidence) * 100).toFixed(1)}%` : '',
       meta.auto_browser ? '已自动切换浏览器渲染' : '',
       meta.deep ? `深度抓取 ${meta.pages_fetched} 页${meta.truncated ? '（已截断）' : ''}` : '',
@@ -365,9 +381,11 @@ function renderJob(job) {
   const statsBox = $('stats');
   statsBox.textContent = '';
   if (job.status === 'done') {
+    const quality = meta.quality || (meta.auto_detection || {}).quality || {};
     [
       ['总行数', job.total_rows],
       ['字段数', job.columns.length],
+      ['置信度', quality.confidence !== undefined ? `${Math.round(quality.confidence * 100)}%` : '-'],
       ['抓取页数', meta.pages_fetched || 1],
       ['耗时', meta.elapsed_ms ? `${(meta.elapsed_ms / 1000).toFixed(1)}s` : '-'],
     ].forEach(([label, value]) => {
