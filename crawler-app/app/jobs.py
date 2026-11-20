@@ -18,11 +18,15 @@ from .extractor import (
     Extraction,
     ExtractionError,
     build_schema,
+    detect_text_format,
     extract_article,
     extract_auto,
     extract_css,
+    extract_delimited,
     extract_feed,
+    extract_json_data,
     extract_table,
+    extract_workbook,
     frame_sources,
     normalize_rule,
     parse_tables,
@@ -263,7 +267,13 @@ class JobRunner:
         if request.source == "html":
             html = request.html
             base = request.base_url or "https://example.com/"
-            extraction, detected = self._extract_one(html, base, request)
+            text_format = detect_text_format(html) if request.mode == "auto" else "html"
+            if text_format == "json":
+                extraction, detected = extract_json_data(html, base)
+            elif text_format == "csv":
+                extraction, detected = extract_delimited(html, base)
+            else:
+                extraction, detected = self._extract_one(html, base, request)
             meta["pages_fetched"] = 1
             meta["resolved_mode"] = detected["mode"] if detected else request.mode
             meta["quality"] = extraction.quality
@@ -339,6 +349,24 @@ class JobRunner:
                     if request.mode != "auto":
                         raise ExtractionError("RSS / Atom 订阅源请使用智能识别模式")
                     extraction, detected = extract_feed(result.html, result.url)
+                elif result.kind == "json":
+                    if request.mode != "auto":
+                        raise ExtractionError("JSON 数据请使用智能识别模式")
+                    extraction, detected = extract_json_data(result.html, result.url)
+                elif result.kind in {"csv", "text"}:
+                    if request.mode != "auto":
+                        raise ExtractionError("分隔符文本请使用智能识别模式")
+                    extraction, detected = extract_delimited(result.html, result.url)
+                elif result.kind == "xlsx":
+                    if request.mode != "auto":
+                        raise ExtractionError("Excel 文件请使用智能识别模式")
+                    extraction, detected = extract_workbook(result.body, result.url)
+                elif result.kind == "xls":
+                    raise ExtractionError(
+                        "检测到旧版 .xls 文件，请另存为 .xlsx 后再抓取"
+                    )
+                elif result.kind == "pdf":
+                    raise ExtractionError("该地址是 PDF 文件，暂不支持直接抽取表格")
                 else:
                     try:
                         extraction, detected = self._extract_one(

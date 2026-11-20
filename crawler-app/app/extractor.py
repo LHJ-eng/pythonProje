@@ -1153,6 +1153,246 @@ def _looks_numeric(value: str) -> bool:
     )
 
 
+# ------------------------------------------------- 任意格式表格（CSV / JSON / Excel）
+_DATE_LIKE = re.compile(r"\d{4}[-/.年]\d{1,2}|\d{1,2}:\d{2}")
+_YEAR_LIKE = re.compile(r"^(?:19|20)\d{2}(?:年)?$")
+
+
+def _csv_delimiter(text: str) -> str | None:
+    """从若干行推断稳定的分隔符，避免把普通正文误判为表格。"""
+    lines = [line for line in (text or "").splitlines() if line.strip()][:8]
+    if len(lines) < 2 or max(len(line) for line in lines) > 2000:
+        return None
+    best = None
+    for delimiter in ("\t", ",", ";", "|"):
+        counts = [line.count(delimiter) for line in lines]
+        if min(counts) >= 1 and len(set(counts)) == 1:
+            if best is None or counts[0] > best[0]:
+                best = (counts[0], delimiter)
+    return best[1] if best else None
+
+
+def _split_header(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """判断首行是否为表头，返回 (列名, 数据行)。"""
+    if not rows:
+        return [], []
+    width = max(len(row) for row in rows)
+    if width == 0:
+        return [], []
+    padded = [list(row) + [""] * (width - len(row)) for row in rows]
+    first = padded[0]
+    if len(padded) >= 2 and all(first) and len(set(first)) == width:
+        if any(
+            not _looks_numeric(cell) and not _DATE_LIKE.search(cell)
+            for cell in first
+        ):
+            body = padded[1:]
+            evidence = False
+            conflict = False
+            for column in range(width):
+                values = [row[column] for row in body[:8] if row[column]]
+                if not values:
+                    continue
+                ratio = sum(
+                    _looks_numeric(value) or bool(_DATE_LIKE.search(value))
+                    for value in values
+                ) / len(values)
+                if ratio < 0.6:
+                    continue
+                evidence = True
+                cell = first[column]
+                # 数据列是数值，而首行同列也是数值且不是年份，说明首行是数据行
+                if _looks_numeric(cell) and not _YEAR_LIKE.match(cell) and not _DATE_LIKE.search(cell):
+                    conflict = True
+                    break
+            if not conflict and (evidence or len(padded) >= 4):
+                return _unique_columns(first), body
+    return [f"列{index + 1}" for index in range(width)], padded
+
+
+def detect_text_format(text: str) -> str:
+    """识别粘贴文本的真实格式：html / json / csv，用于自动分流。"""
+    head = (text or "").lstrip("\ufeff \t\r\n")
+    if not head:
+        return "html"
+    lowered = head[:4096].lower()
+    if (
+        lowered.startswith("<!doctype html")
+        or lowered.startswith("<html")
+        or "<table" in lowered
+        or "<body" in lowered
+    ):
+        return "html"
+    if head[0] in "[{":
+        import json
+
+        try:
+            json.loads(head)
+            return "json"
+        except (ValueError, TypeError):
+            return "html"
+    return "csv" if _csv_delimiter(head) else "html"
+
+
+def extract_delimited(text: str, base_url: str = "") -> tuple[Extraction, dict]:
+    """把 CSV / TSV / 分号分隔文本解析成表格。"""
+    import csv
+    import io
+
+    delimiter = _csv_delimiter(text) or ","
+    try:
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = [[_collapse(str(cell)) for cell in row] for row in reader]
+    except csv.Error as exc:
+        raise ExtractionError(f"分隔符文本解析失败：{exc}") from exc
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if len(rows) < 2:
+        raise ExtractionError("分隔符文本内容不足，未能形成数据表")
+    columns, body = _split_header(rows)
+    label = "TSV" if delimiter == "\t" else "CSV"
+    return Extraction(columns=_unique_columns(columns), rows=body), {
+        "mode": "csv",
+        "score": 0.85,
+        "reason": f"识别为 {label} 表格：{len(body)} 行 × {len(columns)} 列",
+        "delimiter": delimiter,
+    }
+
+
+def _matrix_rows(value) -> list[list[str]]:
+    """把 JSON 中的二维数组（如 values / rows）转成字符串行。"""
+    if not isinstance(value, list) or len(value) < 3:
+        return []
+    arrays = [item for item in value if isinstance(item, list)]
+    if len(arrays) / len(value) < 0.9:
+        return []
+    widths = [len(item) for item in arrays]
+    width = statistics.mode(widths)
+    if width < 2 or widths.count(width) / len(widths) < 0.8:
+        return []
+    rows: list[list[str]] = []
+    for item in arrays[:2000]:
+        if any(isinstance(cell, (dict, list)) for cell in item):
+            return []
+        rows.append(
+            [_collapse(str(cell)) if cell is not None else "" for cell in item[:50]]
+        )
+    return rows
+
+
+def _iter_matrix_rows(value, depth: int = 0):
+    if depth > 5:
+        return
+    if isinstance(value, list):
+        rows = _matrix_rows(value)
+        if rows:
+            yield rows
+        for child in value:
+            yield from _iter_matrix_rows(child, depth + 1)
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _iter_matrix_rows(child, depth + 1)
+
+
+def extract_json_data(payload, base_url: str = "") -> tuple[Extraction, dict]:
+    """解析 JSON 接口 / 文件：记录列表、二维数组或单条对象。"""
+    import json
+
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError) as exc:
+            raise ExtractionError(f"JSON 解析失败：{exc}") from exc
+    candidates: list[tuple[float, Extraction, str]] = []
+    for score, records in _record_lists(payload):
+        extraction = _records_to_extraction(records, base_url)
+        if extraction:
+            candidates.append(
+                (score + 0.03, extraction, f"JSON 记录列表：{len(extraction.rows)} 条")
+            )
+    for rows in _iter_matrix_rows(payload):
+        columns, body = _split_header(rows)
+        if len(body) < 2 or len(columns) < 2:
+            continue
+        extraction = Extraction(columns=_unique_columns(columns), rows=body)
+        candidates.append(
+            (0.88, extraction, f"JSON 二维表格：{len(body)} 行 × {len(columns)} 列")
+        )
+    if isinstance(payload, dict):
+        extraction = _records_to_extraction([payload], base_url)
+        if extraction:
+            candidates.append((0.6, extraction, "JSON 单条对象"))
+    if not candidates:
+        raise ExtractionError("JSON 中没有发现可用的表格或记录列表")
+    score, extraction, reason = max(candidates, key=lambda item: item[0])
+    return extraction, {
+        "mode": "json",
+        "score": round(min(score, 0.95), 3),
+        "reason": reason,
+    }
+
+
+def _workbook_cell(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):
+        try:
+            if not getattr(value, "hour", 0) and not getattr(value, "minute", 0):
+                return value.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return _collapse(str(value))
+
+
+def extract_workbook(data: bytes, base_url: str = "") -> tuple[Extraction, dict]:
+    """解析 Excel（.xlsx），自动选择数据量最大的工作表。"""
+    from io import BytesIO
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ExtractionError("未安装 openpyxl，无法解析 Excel 文件") from exc
+    book = None
+    try:
+        book = load_workbook(BytesIO(data), read_only=True, data_only=True)
+        best = None
+        for sheet in list(book.worksheets)[:10]:
+            grid: list[list[str]] = []
+            for row in sheet.iter_rows(values_only=True, max_row=5000, max_col=50):
+                values = [_workbook_cell(cell) for cell in row]
+                while values and not values[-1]:
+                    values.pop()
+                if any(values):
+                    grid.append(values)
+            if not grid:
+                continue
+            width = max(len(row) for row in grid)
+            score = len(grid) * max(width, 1)
+            if best is None or score > best[0]:
+                best = (score, sheet.title, grid)
+    except ExtractionError:
+        raise
+    except Exception as exc:
+        raise ExtractionError(f"Excel 解析失败：{exc}") from exc
+    finally:
+        if book is not None:
+            try:
+                book.close()
+            except Exception:
+                pass
+    if best is None:
+        raise ExtractionError("Excel 中没有可用的数据")
+    _, sheet_name, grid = best
+    columns, body = _split_header(grid)
+    if not body:
+        raise ExtractionError("Excel 中没有可用的数据行")
+    return Extraction(columns=_unique_columns(columns), rows=body), {
+        "mode": "xlsx",
+        "score": 0.9,
+        "reason": f"Excel 工作表「{sheet_name}」：{len(body)} 行 × {len(columns)} 列",
+    }
+
+
+
 # ------------------------------------------------------------------ 结构化数据
 _JSONLD_TYPES = {
     "Product",
@@ -1615,6 +1855,165 @@ def extract_json_payloads(
     }
 
 
+def extract_grid(
+    html: str,
+    row_selector: str,
+    *,
+    columns: int | None = None,
+    header: bool = True,
+) -> Extraction:
+    """从 div / section 等非 table 布局里按“行选择器”提取二维表格。"""
+    if not row_selector:
+        raise ExtractionError("类表格规则缺少行选择器")
+    soup = make_soup(html)
+    try:
+        items = soup.select(row_selector)
+    except Exception as exc:
+        raise ExtractionError(f"行选择器语法错误：{exc}") from exc
+    if not items:
+        raise ExtractionError("未找到类表格行，页面结构可能已变化")
+    rows: list[list[str]] = []
+    for item in items:
+        cells = [
+            child for child in item.find_all(recursive=False)
+            if not _auto_hidden(child)
+        ]
+        rows.append([_collapse(cell.get_text(" ", strip=True)) for cell in cells])
+    width = columns or statistics.mode([len(row) for row in rows])
+    if not width or width < 2:
+        raise ExtractionError("类表格行内的单元格不足，无法形成数据表")
+    rows = [(row + [""] * width)[:width] for row in rows]
+    if header and len(rows) > 1 and all(rows[0]) and len(set(rows[0])) == width:
+        return Extraction(columns=_unique_columns(rows[0]), rows=rows[1:])
+    return Extraction(
+        columns=[f"列{index + 1}" for index in range(width)], rows=rows
+    )
+
+
+def _best_pseudo_table(html: str) -> tuple[Extraction, dict] | None:
+    """识别没有 <table> 的类表格布局（div / section 搭出来的数据表）。
+
+    要求首行具有表头特征、后续行至少一列是数值或日期，避免把商品卡片、
+    导航区块误判成表格。
+    """
+    soup = make_soup(html)
+    best = None
+    skip = {
+        "table", "tr", "td", "th", "tbody", "thead", "tfoot",
+        "ul", "ol", "select", "nav", "form",
+    }
+    for container in soup.find_all(True)[:800]:
+        if container.name in skip or _auto_blocked(container):
+            continue
+        children = [
+            child for child in container.find_all(recursive=False)
+            if not _auto_hidden(child)
+        ]
+        if len(children) < 3:
+            continue
+        groups: dict[str, list] = {}
+        for child in children:
+            groups.setdefault(f"tag:{child.name}", []).append(child)
+            for cls in child.get("class", []):
+                cls = str(cls)
+                if cls and _safe_css_ident(cls):
+                    groups.setdefault(f"class:{cls}", []).append(child)
+        for key, items in groups.items():
+            if len(items) < 3 or len(items) / len(children) < 0.6:
+                continue
+            counts: list[int] = []
+            cell_rows: list[list[str]] = []
+            for item in items:
+                cells = [
+                    child for child in item.find_all(recursive=False)
+                    if not _auto_hidden(child)
+                ]
+                counts.append(len(cells))
+                cell_rows.append(
+                    [_collapse(cell.get_text(" ", strip=True)) for cell in cells]
+                )
+            width = statistics.mode(counts)
+            if width < 3 or width > 12:
+                continue
+            if counts.count(width) / len(counts) < 0.8:
+                continue
+            cell_rows = [(row + [""] * width)[:width] for row in cell_rows]
+            nonempty = sum(
+                bool(cell) for row in cell_rows for cell in row
+            ) / (len(cell_rows) * width)
+            if nonempty < 0.75:
+                continue
+            lengths = [len(cell) for row in cell_rows for cell in row if cell]
+            if not lengths or statistics.median(lengths) > 80:
+                continue
+            header = cell_rows[0]
+            if not (all(header) and len(set(header)) == width):
+                continue
+            if any(_looks_numeric(cell) or _DATE_LIKE.search(cell) for cell in header):
+                continue
+            evidence = 0
+            for column in range(width):
+                values = [row[column] for row in cell_rows[1:] if row[column]]
+                if not values:
+                    continue
+                ratio = sum(
+                    _looks_numeric(value) or bool(_DATE_LIKE.search(value))
+                    for value in values
+                ) / len(values)
+                evidence += ratio >= 0.5
+            if evidence < 1:
+                continue
+            shared = set(str(value) for value in items[0].get("class", []))
+            for item in items[1:]:
+                shared.intersection_update(
+                    str(value) for value in item.get("class", [])
+                )
+            shared = {value for value in shared if _safe_css_ident(value)}
+            if key.startswith("class:"):
+                part = f".{key.split(':', 1)[1]}"
+            else:
+                part = key.split(":", 1)[1] + "".join(
+                    f".{value}" for value in sorted(shared)
+                )
+            row_selector = f"{_auto_parent_selector(container, soup)} > {part}"
+            try:
+                if len(soup.select(row_selector)) < 3:
+                    continue
+            except Exception:
+                continue
+            score = (
+                0.3 * min(len(items) / 5, 1)
+                + 0.25 * nonempty
+                + 0.2 * (counts.count(width) / len(counts))
+                + 0.15 * min(width / 4, 1)
+                + 0.1
+            )
+            score = max(0.0, min(score, 1.0)) - 0.03
+            if score < 0.7:
+                continue
+            extraction = extract_grid(html, row_selector, columns=width, header=True)
+            if best is None or score > best[0]:
+                best = (score, extraction, row_selector, len(items), width)
+    if best is None:
+        return None
+    score, extraction, row_selector, count, width = best
+    return extraction, {
+        "mode": "grid",
+        "score": round(score, 3),
+        "reason": f"检测到 {count} 行 × {width} 列的类表格布局",
+        "row_selector": row_selector,
+        "columns": width,
+        "header": True,
+    }
+
+
+def _generic_columns(extraction: Extraction) -> bool:
+    return all(
+        re.fullmatch(r"(字段|列)\d*(_\d+)?", column or "")
+        for column in extraction.columns
+    )
+
+
 def extract_auto(
     html: str,
     base_url: str,
@@ -1648,6 +2047,13 @@ def extract_auto(
             )
         elif mode == "article":
             extraction = extract_article(html, base_url)
+        elif mode == "grid":
+            extraction = extract_grid(
+                html,
+                str(rule.get("row_selector", "")),
+                columns=rule.get("columns"),
+                header=bool(rule.get("header", True)),
+            )
         elif mode == "structured":
             structured = extract_structured(html, base_url)
             if structured is None:
@@ -1673,6 +2079,16 @@ def extract_auto(
     table_candidate = _best_auto_table(html)
     if table_candidate:
         candidates.append(table_candidate)
+    # 没有可靠的真实表格时，再尝试 div / section 搭出来的类表格布局，
+    # 避免把 div 数据表误当成普通重复列表。
+    grid_candidate = None
+    if table_candidate is None or table_candidate[1]["score"] < 0.65:
+        try:
+            grid_candidate = _best_pseudo_table(html)
+        except Exception:
+            grid_candidate = None
+        if grid_candidate:
+            candidates.append(grid_candidate)
     try:
         list_candidate = _best_auto_list(html, base_url, relaxed=browser_rendered)
     except ExtractionError:
@@ -1743,6 +2159,14 @@ def extract_auto(
     except (ExtractionError, IndexError):
         pass
 
+    # 带表头的类表格（grid）比“字段/字段_1”这类匿名重复列表更可读，
+    # 当列表没有推断出语义列名时让位给类表格。
+    if grid_candidate and not _generic_columns(grid_candidate[0]):
+        candidates = [
+            item for item in candidates
+            if not (item[1].get("mode") == "css" and _generic_columns(item[0]))
+        ]
+
     best_structured = max(candidates, key=lambda item: item[1]["score"]) if candidates else None
     low_confidence = False
     # 浏览器渲染后的页面通常是应用/列表页：只要列表/结构化/表格候选分数够，就优先于正文
@@ -1752,7 +2176,7 @@ def extract_auto(
         browser_rendered
         and best_structured
         and best_structured[1]["score"] >= 0.40
-        and (list_candidate or structured_candidate or network_candidate)
+        and (list_candidate or structured_candidate or network_candidate or grid_candidate)
     ):
         # 渲染页：列表/结构化分数超过 0.4 即优先，避免正文把列表数据吞掉
         extraction, detected = best_structured
@@ -1781,6 +2205,7 @@ def extract_auto(
     detected = dict(detected)
     detected["candidates"] = {
         "table": table_candidate[1]["score"] if table_candidate else 0,
+        "grid": grid_candidate[1]["score"] if grid_candidate else 0,
         "list": list_candidate[1]["score"] if list_candidate else 0,
         "structured": structured_candidate[1]["score"] if structured_candidate else 0,
         "network": network_candidate[1]["score"] if network_candidate else 0,
@@ -1890,6 +2315,7 @@ def build_schema(
         "mode": mode,
         "item_selector": str(detected.get("item_selector") or ""),
         "item_selector_type": str(detected.get("item_selector_type") or "css"),
+        "row_selector": str(detected.get("row_selector") or ""),
         "table_index": detected.get("table_index"),
         "first_row_header": bool(detected.get("first_row_header")),
         "fields": fields,

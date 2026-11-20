@@ -194,7 +194,12 @@ function currentRequest({ forAnalyze = false } = {}) {
 function renderAnalysis(data) {
   analysisBox.hidden = false;
   lastAutoRule = data.auto || null;
-  const sizeText = data.image ? `图片约 ${Math.ceil(data.chars / 1000)} KB` : `HTML ${data.chars} 字符`;
+  const autoMode = data.auto?.mode;
+  const sizeText = data.image
+    ? `图片约 ${Math.ceil(data.chars / 1000)} KB`
+    : ['json', 'csv', 'xlsx'].includes(autoMode)
+      ? `数据 ${data.chars} 字符`
+      : `HTML ${data.chars} 字符`;
   $('analysis-summary').textContent =
     `${data.title || '（无标题）'} · 链接 ${data.links} 个 · ${sizeText}` +
     (data.url ? ` · ${data.url}` : '');
@@ -204,7 +209,7 @@ function renderAnalysis(data) {
   selectedTableIndex = null;
 
   if (lastAutoRule && lastAutoRule.mode) {
-    const labels = { table: 'HTML 数据表', css: '重复列表 / 卡片', article: '正文文章', structured: '页面结构化数据', network: '浏览器网络 JSON', feed: 'RSS / Atom 订阅源', ocr: '图片文字识别' };
+    const labels = { table: 'HTML 数据表', grid: 'div 类表格布局', css: '重复列表 / 卡片', article: '正文文章', structured: '页面结构化数据', network: '浏览器网络 JSON', json: 'JSON 数据表', csv: 'CSV / 分隔符文本', xlsx: 'Excel 工作表', feed: 'RSS / Atom 订阅源', ocr: '图片文字识别' };
     const card = node('div', 'auto-card');
     const score = lastAutoRule.score === undefined ? '' : ` · 置信度 ${Math.round(lastAutoRule.score * 100)}%`;
     card.appendChild(node('b', '', `智能识别：${labels[lastAutoRule.mode] || lastAutoRule.mode}${score}`));
@@ -274,7 +279,7 @@ function renderAnalysis(data) {
       });
       tablesBox.appendChild(card);
     });
-  } else if (!data.image) {
+  } else if (!data.image && !['json', 'csv', 'xlsx', 'feed', 'grid'].includes(lastAutoRule?.mode)) {
     tablesBox.appendChild(node('p', 'hint', '未检测到 HTML 表格；仍可直接尝试智能抓取。'));
   }
 

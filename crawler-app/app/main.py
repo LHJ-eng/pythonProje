@@ -29,8 +29,12 @@ from .extractor import (
     ExtractionError,
     analyze_page,
     build_schema,
+    detect_text_format,
     extract_auto,
+    extract_delimited,
     extract_feed,
+    extract_json_data,
+    extract_workbook,
     frame_sources,
     normalize_rule,
 )
@@ -111,6 +115,28 @@ def _auto_payload(html: str, base_url: str, json_payloads: list | None = None) -
         return {"detected": {"mode": None, "error": str(exc)}, "schema": None}
 
 
+def _tabular_payload(
+    extraction, detected: dict | None, url: str, chars: int
+) -> dict:
+    """把 JSON / CSV / Excel 等非 HTML 表格结果包装成与分析接口一致的响应。"""
+    return {
+        "title": (detected or {}).get("reason") or "数据表格",
+        "url": url,
+        "tables": [],
+        "article": {"length": 0, "preview": ""},
+        "auto": {
+            **(detected or {}),
+            "rows": len(extraction.rows),
+            "columns": extraction.columns,
+            "preview": extraction.rows[:3],
+            "quality": extraction.quality,
+            "warnings": extraction.warnings,
+        },
+        "links": 0,
+        "chars": max(0, int(chars)),
+    }
+
+
 def _session(request: Request) -> dict | None:
     settings: Settings = request.app.state.settings
     return read_session(settings.secret_key, request.cookies.get(COOKIE_NAME))
@@ -158,7 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         print("请登录后在 .env 中设置 APP_PASSWORD，并删除初始密码文件。")
         print("=" * 64)
 
-    app = FastAPI(title="DataHarvester", version="1.3.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DataHarvester", version="1.4.0", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.limiter = LoginRateLimiter()
     app.state.runner = JobRunner(settings)
@@ -195,13 +221,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "1.3.0"}
+        return {"status": "ok", "version": "1.4.0"}
 
     @app.get("/api/metrics")
     async def metrics(session: dict = Depends(require_auth)):
         cache_stats = settings.cache.stats() if settings.cache else {"enabled": False}
         return {
-            "version": "1.3.0",
+            "version": "1.4.0",
             "jobs": storage.job_stats(settings.db_path),
             "cache": cache_stats,
             "settings": {
@@ -264,7 +290,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.source == "html":
             if len(body.html.strip()) < 20:
                 raise HTTPException(status_code=400, detail="粘贴的 HTML 内容过短")
-            return analyze_page(body.html, body.base_url or "https://example.com/")
+            base = body.base_url or "https://example.com/"
+            text_format = detect_text_format(body.html)
+            try:
+                if text_format == "json":
+                    extraction, rule = extract_json_data(body.html, base)
+                    return _tabular_payload(extraction, rule, base, len(body.html))
+                if text_format == "csv":
+                    extraction, rule = extract_delimited(body.html, base)
+                    return _tabular_payload(extraction, rule, base, len(body.html))
+                return analyze_page(body.html, base)
+            except ExtractionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             url = validate_url(
                 body.url, allow_private=settings.allow_private_network
@@ -335,6 +372,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "links": 0,
                         "chars": len(result.body),
                     }
+                if result.kind == "json":
+                    extraction, rule = extract_json_data(result.html, result.url)
+                    return _tabular_payload(
+                        extraction, rule, result.url, len(result.html)
+                    )
+                if result.kind in {"csv", "text"}:
+                    extraction, rule = extract_delimited(result.html, result.url)
+                    return _tabular_payload(
+                        extraction, rule, result.url, len(result.html)
+                    )
+                if result.kind == "xlsx":
+                    extraction, rule = extract_workbook(result.body, result.url)
+                    return _tabular_payload(
+                        extraction, rule, result.url, len(result.body)
+                    )
+                if result.kind == "xls":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="检测到旧版 .xls 文件，请另存为 .xlsx 后再抓取",
+                    )
+                if result.kind == "pdf":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="该地址是 PDF 文件，暂不支持直接抽取表格",
+                    )
                 return analyze_page(
                     result.html, result.url, json_payloads=result.json_payloads
                 )
@@ -377,9 +439,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except (FetchError, InvalidURLError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             if result.kind != "html":
+                kind_label = {
+                    "json": "JSON 数据",
+                    "csv": "CSV / 分隔符文本",
+                    "text": "纯文本",
+                    "xlsx": "Excel 文件",
+                    "xls": "旧版 Excel 文件",
+                    "pdf": "PDF 文件",
+                    "image": "图片",
+                    "feed": "RSS / Atom 订阅源",
+                }.get(result.kind, result.kind)
                 raise HTTPException(
                     status_code=400,
-                    detail="该地址不是 HTML 页面，无法生成可视化快照",
+                    detail=f"该地址是{kind_label}，无法生成可视化快照；请直接点击「开始抓取」智能提取表格",
                 )
             html = result.html
             base_url = result.url

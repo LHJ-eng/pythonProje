@@ -38,12 +38,12 @@
       <div id="pane-url">
         <input id="url" type="text" spellcheck="false"
                placeholder="https://example.com/list?page={page}">
-        <p class="hint">粘贴网页或 JPG / PNG / WebP 图片地址，直接点击「开始抓取」。多页规则请在高级设置中配置。</p>
+        <p class="hint">粘贴任意网页 / 图片 / CSV / JSON / Excel 地址，直接点击「开始抓取」；系统按内容识别类型，不依赖 URL 后缀。多页规则请在高级设置中配置。</p>
       </div>
 
       <div id="pane-html" hidden>
         <textarea id="html" rows="7" spellcheck="false"
-                  placeholder="把网页源代码粘贴到这里，或选择本地 .html 文件"></textarea>
+                  placeholder="粘贴网页源码 / CSV / JSON 文本，或选择本地 .html 文件"></textarea>
         <div class="row">
           <input id="base-url" type="text" spellcheck="false"
                  placeholder="基准 URL（可选，用于补全相对链接）">

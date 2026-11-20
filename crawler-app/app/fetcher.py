@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit, urljoin
+from urllib.parse import quote, urlsplit, urljoin
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -30,6 +30,14 @@ _FEED_CONTENT_TYPES = {
     "application/xml",
     "text/xml",
 }
+_DELIMITED_CONTENT_TYPES = {
+    "text/csv",
+    "application/csv",
+    "text/tab-separated-values",
+    "text/plain",
+}
+_XLSX_MAGIC = b"PK\x03\x04"
+_EXCEL_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _META_CHARSET = re.compile(
     rb"""<meta[^>]+charset=["']?\s*([a-zA-Z0-9_\-]+)""", re.IGNORECASE
 )
@@ -215,6 +223,8 @@ async def _get_with_redirects(
             if not location:
                 raise FetchError("重定向响应缺少 Location 头")
             current = urljoin(current, location)
+            # 有些站点在 Location 里直接放空格/中文文件名，先做安全编码再校验
+            current = quote(current, safe=":/?#[]@!$&'()*+,;=%~+-._")
             # 每一次跳转都重新做 SSRF 校验，防止跳转绕过
             current = validate_url(
                 current, allow_private=settings.allow_private_network
@@ -419,11 +429,84 @@ def _looks_like_feed(body: bytes, mime: str) -> bool:
     return head.startswith(b"<rss") or head.startswith(b"<feed")
 
 
+def _looks_like_workbook(body: bytes, mime: str) -> bool:
+    if mime in {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    }:
+        return True
+    if not body.startswith(_XLSX_MAGIC):
+        return False
+    try:
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            return any(name.startswith("xl/") for name in archive.namelist()[:500])
+    except Exception:
+        return False
+
+
+def _looks_like_html_text(text: str) -> bool:
+    head = text[:8192].lstrip("\ufeff \t\r\n").lower()
+    if not head:
+        return False
+    return (
+        head.startswith("<!doctype html")
+        or head.startswith("<html")
+        or "<html" in head[:4096]
+        or "<body" in head[:4096]
+        or "<table" in head
+        or "<div" in head
+    )
+
+
+def _delimited_sample(text: str) -> str | None:
+    lines = [line for line in text.splitlines() if line.strip()][:8]
+    if len(lines) < 4:
+        return None
+    if max(len(line) for line in lines) > 2000:
+        return None
+    best = None
+    for delimiter in ("\t", ",", ";", "|"):
+        counts = [line.count(delimiter) for line in lines]
+        if min(counts) >= 1 and len(set(counts)) == 1:
+            if best is None or counts[0] > best[0]:
+                best = (counts[0], delimiter)
+    return best[1] if best else None
+
+
+def _sniff_text_kind(text: str, mime: str, url: str) -> str | None:
+    """按内容而不是 URL 后缀判断响应类型，兼容 .php/.asp/无后缀等任意地址。"""
+    head = text[:65536].lstrip("\ufeff \t\r\n")
+    if not head:
+        return None
+    if _looks_like_html_text(head):
+        return "html"
+    if head[0] in "[{":
+        import json
+
+        try:
+            json.loads(head)
+            return "json"
+        except (ValueError, TypeError):
+            pass
+    path = urlsplit(url).path.lower()
+    suffix = path.rsplit("/", 1)[-1].rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else ""
+    if suffix in {"csv", "tsv"} or mime in _DELIMITED_CONTENT_TYPES:
+        return "csv"
+    return "csv" if _delimited_sample(text) else None
+
+
 def _cache_result(entry: CacheEntry, started: float, via: str) -> FetchResult:
     mime = entry.content_type.split(";", 1)[0].strip().lower()
-    kind = "feed" if _looks_like_feed(entry.body, mime) else "html"
+    text = _decode_body(entry.body, entry.content_type)
+    if _looks_like_feed(entry.body, mime):
+        kind = "feed"
+    else:
+        kind = _sniff_text_kind(text, mime, entry.url) or "html"
     return FetchResult(
-        html=_decode_body(entry.body, entry.content_type),
+        html=text,
         url=entry.url,
         status=entry.status,
         content_type=entry.content_type,
@@ -494,28 +577,39 @@ async def fetch_url(
             await response.aclose()
 
     kind = "html"
-    if allow_image and _is_supported_image(body, content_type):
+    text = ""
+    if _is_supported_image(body, content_type):
         kind = "image"
-    elif allow_image and _looks_like_feed(body, mime):
+    elif _looks_like_feed(body, mime):
         kind = "feed"
-    if status >= 400 and (not browser or kind in {"image", "feed"}):
+    elif _looks_like_workbook(body, mime):
+        kind = "xlsx"
+    elif body.startswith(_EXCEL_MAGIC):
+        kind = "xls"
+    elif body.startswith(b"%PDF-"):
+        kind = "pdf"
+    else:
+        text = _decode_body(body, content_type)
+        kind = _sniff_text_kind(text, mime, final_url) or "text"
+
+    if status >= 400 and (not browser or kind != "html"):
         hint = "，该站点可能需要浏览器渲染" if status in (403, 429, 503) and kind == "html" else ""
         raise FetchError(f"目标返回 HTTP {status}{hint}")
     if kind == "image":
+        if not allow_image:
+            raise FetchError(
+                f"目标不是 HTML 页面（Content-Type: {content_type}）。"
+                "若需要识别图片文字，请使用智能识别模式"
+            )
         if len(body) > MAX_IMAGE_BYTES:
             raise FetchError("图片超过 10 MB 限制，已中止")
         html = ""
+    elif kind in {"xlsx", "xls", "pdf"}:
+        html = ""
     else:
-        html = _decode_body(body, content_type)
-        if (
-            kind == "html"
-            and content_type
-            and "html" not in content_type.lower()
-            and "xml" not in content_type.lower()
-        ):
-            raise FetchError(f"目标不是 HTML 页面（Content-Type: {content_type}）")
+        html = text or _decode_body(body, content_type)
 
-    if cache and not browser and kind in {"html", "feed"} and status < 400:
+    if cache and not browser and kind in {"html", "feed", "json", "csv", "text"} and status < 400:
         cache.put(
             url,
             status=status,
@@ -546,7 +640,7 @@ async def fetch_url(
         elapsed_ms=int((time.perf_counter() - started) * 1000),
         via=via,
         kind=kind,
-        body=body if kind == "image" else b"",
+        body=body if kind in {"image", "xlsx", "pdf"} else b"",
         retries=retries,
         json_payloads=json_payloads,
     )
