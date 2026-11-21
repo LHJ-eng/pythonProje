@@ -184,7 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         print("请登录后在 .env 中设置 APP_PASSWORD，并删除初始密码文件。")
         print("=" * 64)
 
-    app = FastAPI(title="DataHarvester", version="1.4.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DataHarvester", version="1.5.0", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.limiter = LoginRateLimiter()
     app.state.runner = JobRunner(settings)
@@ -221,13 +221,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": "1.4.0"}
+        return {"status": "ok", "version": "1.5.0"}
 
     @app.get("/api/metrics")
     async def metrics(session: dict = Depends(require_auth)):
         cache_stats = settings.cache.stats() if settings.cache else {"enabled": False}
         return {
-            "version": "1.4.0",
+            "version": "1.5.0",
             "jobs": storage.job_stats(settings.db_path),
             "cache": cache_stats,
             "settings": {

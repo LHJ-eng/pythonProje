@@ -51,6 +51,34 @@ function node(tag, className, text) {
   return element;
 }
 
+function renderPreviewState(message, state = 'idle') {
+  const preview = $('preview');
+  preview.textContent = '';
+  const box = node('div', `empty-state ${state}`);
+  const orbit = node('div', 'empty-orbit');
+  orbit.setAttribute('aria-hidden', 'true');
+  for (let index = 0; index < 3; index += 1) orbit.appendChild(node('i'));
+  orbit.appendChild(node('span'));
+  box.appendChild(orbit);
+  const titles = { idle: '等待数据接入', running: '采集任务进行中', error: '本次任务未完成' };
+  const labels = { idle: 'READY FOR COLLECTION', running: 'EXTRACTING DATA', error: 'TASK INTERRUPTED' };
+  box.appendChild(node('strong', '', titles[state] || titles.idle));
+  box.appendChild(node('p', '', message));
+  box.appendChild(node('small', '', labels[state] || labels.idle));
+  preview.appendChild(box);
+}
+
+function bindSurfaceGlow() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelectorAll('.panel').forEach((surface) => {
+    surface.addEventListener('pointermove', (event) => {
+      const rect = surface.getBoundingClientRect();
+      surface.style.setProperty('--glow-x', `${event.clientX - rect.left}px`);
+      surface.style.setProperty('--glow-y', `${event.clientY - rect.top}px`);
+    });
+  });
+}
+
 function fmtTime(raw) {
   return raw ? raw.slice(5, 16) : '';
 }
@@ -322,6 +350,7 @@ async function analyzePage() {
 
 /* ------------------------------------------------------------------ 任务 */
 function renderJob(job) {
+  $('preview').closest('.results').dataset.status = job.status;
   const pill = $('job-status');
   pill.textContent = statusLabel(job.status);
   pill.className = 'pill ' + job.status;
@@ -394,7 +423,8 @@ function renderJob(job) {
       ['抓取页数', meta.pages_fetched || 1],
       ['耗时', meta.elapsed_ms ? `${(meta.elapsed_ms / 1000).toFixed(1)}s` : '-'],
     ].forEach(([label, value]) => {
-      const chip = node('span', 'stat-chip', `${label} `);
+      const chip = node('span', 'stat-chip');
+      chip.appendChild(node('span', 'stat-label', label));
       chip.appendChild(node('b', '', String(value)));
       statsBox.appendChild(chip);
     });
@@ -403,11 +433,15 @@ function renderJob(job) {
   const preview = $('preview');
   preview.textContent = '';
   if (job.status !== 'done') {
-    preview.appendChild(node('div', 'empty', job.status === 'error' ? '任务失败，请查看上方错误信息。' : '正在采集数据…'));
+    const failed = job.status === 'error';
+    renderPreviewState(
+      failed ? '任务失败，请查看上方错误信息并调整配置。' : '正在连接数据源并提取结构化内容，请稍候…',
+      failed ? 'error' : 'running'
+    );
     return;
   }
   if (!job.rows.length) {
-    preview.appendChild(node('div', 'empty', '没有提取到数据行。'));
+    renderPreviewState('任务已完成，但当前规则没有提取到数据行。', 'idle');
     return;
   }
 
@@ -479,7 +513,8 @@ async function startJob() {
     $('job-status').textContent = '排队中';
     $('job-status').className = 'pill running';
     $('job-meta').textContent = '任务已提交，正在等待执行…';
-    $('preview').textContent = '';
+    $('preview').closest('.results').dataset.status = 'running';
+    renderPreviewState('任务已进入执行队列，正在建立采集会话…', 'running');
     $('exports').hidden = true;
     $('stats').textContent = '';
     pollJob(data.id);
@@ -547,9 +582,10 @@ function resetResult() {
   $('job-status').textContent = '等待任务';
   $('job-status').className = 'pill idle';
   $('job-meta').textContent = resultsEmptyHint;
+  $('preview').closest('.results').dataset.status = 'idle';
   $('exports').hidden = true;
   $('stats').textContent = '';
-  $('preview').textContent = '';
+  renderPreviewState('配置数据源并启动任务，结构化结果将在这里实时呈现。');
   loadHistory();
 }
 
@@ -1314,6 +1350,7 @@ async function boot() {
     reader.readAsDataURL(file);
   });
 
+  bindSurfaceGlow();
   addField('标题', 'h2', 'text');
   addField('链接', 'a', 'href');
   switchMode('auto');

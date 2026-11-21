@@ -3,45 +3,83 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DataHarvester · 网页数据采集</title>
+  <meta name="theme-color" content="#060a13">
+  <title>DataHarvester · 智能数据采集控制台</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<div class="ambient" aria-hidden="true">
+  <div class="ambient-grid"></div>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="scan-beam"></div>
+</div>
+
 <div class="shell">
   <header class="topbar">
     <div class="brand">
-      <span class="logo">DH</span>
-      <div>
-        <strong>DataHarvester</strong>
-        <small>自托管网页数据采集控制台</small>
+      <span class="logo" aria-hidden="true"><span class="logo-core">DH</span></span>
+      <div class="brand-copy">
+        <div class="brand-title">
+          <strong>DataHarvester</strong>
+          <span class="version-badge">V1.5</span>
+        </div>
+        <small>INTELLIGENT DATA ACQUISITION</small>
       </div>
     </div>
     <div class="top-actions">
-      <span class="dot" title="服务正常"></span>
-      <span class="muted">已登录</span>
-      <button class="ghost" id="logout">退出登录</button>
+      <div class="system-state">
+        <span class="dot" title="服务正常"></span>
+        <span><b>系统在线</b><small>SECURE SESSION</small></span>
+      </div>
+      <button class="ghost" id="logout" type="button">退出登录</button>
     </div>
   </header>
 
+  <section class="command-deck">
+    <div class="command-copy">
+      <div class="eyebrow"><span></span> WEB INTELLIGENCE CONSOLE</div>
+      <h1>让网页数据，<span>清晰可见。</span></h1>
+      <p>从复杂页面到结构化数据，一次完成识别、提取与交付。</p>
+    </div>
+    <div class="capability-strip" aria-label="核心能力">
+      <div class="capability-item">
+        <span class="capability-no">01</span>
+        <div><b>全类型内容识别</b><small>HTML · JSON · EXCEL · OCR</small></div>
+      </div>
+      <div class="capability-item">
+        <span class="capability-no">02</span>
+        <div><b>智能规则引擎</b><small>AUTO DETECTION &amp; HEALING</small></div>
+      </div>
+      <div class="capability-item">
+        <span class="capability-no">03</span>
+        <div><b>本地安全处理</b><small>PRIVATE BY DESIGN</small></div>
+      </div>
+    </div>
+  </section>
+
   <main class="layout">
     <!-- 左侧：任务配置 -->
-    <section class="panel">
-      <h2>新建采集任务</h2>
+    <section class="panel config-panel">
+      <div class="panel-head">
+        <div><span class="panel-index">01 / CONFIGURATION</span><h2>新建采集任务</h2></div>
+        <span class="panel-signal" aria-hidden="true"><i></i><i></i><i></i></span>
+      </div>
 
       <label class="label">数据来源</label>
       <div class="segmented" id="source-tabs">
-        <button class="active" data-source="url">网页 / 图片链接</button>
-        <button data-source="image">本地图片识别</button>
-        <button data-source="html">HTML 源码</button>
+        <button class="active" data-source="url" type="button">网页 / 图片链接</button>
+        <button data-source="image" type="button">本地图片识别</button>
+        <button data-source="html" type="button">HTML 源码</button>
       </div>
 
-      <div id="pane-url">
+      <div id="pane-url" class="source-pane">
         <input id="url" type="text" spellcheck="false"
                placeholder="https://example.com/list?page={page}">
         <p class="hint">粘贴任意网页 / 图片 / CSV / JSON / Excel 地址，直接点击「开始抓取」；系统按内容识别类型，不依赖 URL 后缀。多页规则请在高级设置中配置。</p>
       </div>
 
-      <div id="pane-html" hidden>
+      <div id="pane-html" class="source-pane" hidden>
         <textarea id="html" rows="7" spellcheck="false"
                   placeholder="粘贴网页源码 / CSV / JSON 文本，或选择本地 .html 文件"></textarea>
         <div class="row">
@@ -54,150 +92,154 @@
         </div>
       </div>
 
-      <div id="pane-image" hidden>
-        <label class="file-btn image-file-btn" for="image-file">选择 JPG / PNG / WebP 图片</label>
+      <div id="pane-image" class="source-pane" hidden>
+        <label class="file-btn image-file-btn" for="image-file"><span>选择 JPG / PNG / WebP 图片</span><small>点击浏览本地文件 · 最大 10 MB</small></label>
         <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
         <div id="image-name" class="hint">尚未选择图片</div>
         <img id="image-preview" class="image-preview" alt="待识别图片预览" hidden>
         <p class="hint">支持中文文字和统计表图片，最大 10 MB、2000 万像素。识别结果可导出 Excel / CSV。</p>
       </div>
 
-      <p class="hint" id="primary-hint">无需填写选择器。智能模式会自动识别表格、重复列表、正文；图片链接会自动进行文字识别。</p>
+      <p class="hint primary-hint" id="primary-hint">无需填写选择器。智能模式会自动识别表格、重复列表、正文；图片链接会自动进行文字识别。</p>
 
       <details class="advanced" id="advanced">
-        <summary>高级设置（手动规则、分页、JS 渲染）</summary>
-      <div class="grid2">
-        <div>
-          <label class="label" for="mode">提取方式</label>
-          <select id="mode">
-            <option value="auto" selected>智能识别（推荐）</option>
-            <option value="table">手动 HTML 表格</option>
-            <option value="css">CSS 选择器（列表 / 卡片）</option>
-            <option value="article">正文文章</option>
-          </select>
-        </div>
-        <div>
-          <label class="label" for="browser">页面渲染</label>
-          <select id="browser">
-            <option value="0">静态请求（快）</option>
-            <option value="1">浏览器渲染（JS 页面）</option>
-          </select>
-        </div>
-        <div>
-          <label class="label" for="pages">页数</label>
-          <input id="pages" type="number" min="1" max="20" value="1">
-        </div>
-        <div>
-          <label class="label" for="delay">请求间隔（秒）</label>
-          <input id="delay" type="number" min="0" max="10" step="0.1" value="0.8">
-        </div>
-        <div>
-          <label class="label" for="wait-for">等待选择器（可选）</label>
-          <input id="wait-for" type="text" spellcheck="false" placeholder="例如 .product-item">
-        </div>
-        <div>
-          <label class="label" for="cache-mode">缓存策略</label>
-          <select id="cache-mode">
-            <option value="enabled" selected>优先使用缓存（推荐）</option>
-            <option value="refresh">强制刷新并校验 ETag</option>
-            <option value="bypass">本次跳过缓存</option>
-          </select>
-        </div>
-      </div>
-
-      <label class="check">
-        <input id="scan-full-page" type="checkbox" checked>
-        浏览器渲染时滚动整页，触发懒加载 / 虚拟列表
-      </label>
-
-      <label class="check">
-        <input id="expand-clicks" type="checkbox">
-        浏览器渲染时自动点击「展开 / 加载更多 / 查看全部」按钮
-      </label>
-
-      <div class="template-bar">
-        <label class="label" for="template-select">规则模板</label>
-        <div class="row">
-          <select id="template-select">
-            <option value="">（未选择模板）</option>
-          </select>
-          <button class="ghost small" id="apply-template" type="button">套用</button>
-          <button class="ghost small" id="delete-template" type="button">删除</button>
-          <button class="ghost small" id="save-template" type="button">保存当前规则</button>
-        </div>
-        <p class="hint">模板保存在本地数据库，记录提取规则而不是数据，可跨任务复用。</p>
-      </div>
-
-      <div id="table-options" class="option-block">
-        <div class="grid2">
-          <div>
-            <label class="label" for="table-index">表格序号（留空 = 自动选最大）</label>
-            <input id="table-index" type="number" min="0" placeholder="自动">
+        <summary><span>高级设置</span><small>手动规则 / 分页 / JS 渲染</small></summary>
+        <div class="advanced-content">
+          <div class="grid2">
+            <div>
+              <label class="label" for="mode">提取方式</label>
+              <select id="mode">
+                <option value="auto" selected>智能识别（推荐）</option>
+                <option value="table">手动 HTML 表格</option>
+                <option value="css">CSS 选择器（列表 / 卡片）</option>
+                <option value="article">正文文章</option>
+              </select>
+            </div>
+            <div>
+              <label class="label" for="browser">页面渲染</label>
+              <select id="browser">
+                <option value="0">静态请求（快）</option>
+                <option value="1">浏览器渲染（JS 页面）</option>
+              </select>
+            </div>
+            <div>
+              <label class="label" for="pages">页数</label>
+              <input id="pages" type="number" min="1" max="20" value="1">
+            </div>
+            <div>
+              <label class="label" for="delay">请求间隔（秒）</label>
+              <input id="delay" type="number" min="0" max="10" step="0.1" value="0.8">
+            </div>
+            <div>
+              <label class="label" for="wait-for">等待选择器（可选）</label>
+              <input id="wait-for" type="text" spellcheck="false" placeholder="例如 .product-item">
+            </div>
+            <div>
+              <label class="label" for="cache-mode">缓存策略</label>
+              <select id="cache-mode">
+                <option value="enabled" selected>优先使用缓存（推荐）</option>
+                <option value="refresh">强制刷新并校验 ETag</option>
+                <option value="bypass">本次跳过缓存</option>
+              </select>
+            </div>
           </div>
+
           <label class="check">
-            <input id="first-row-header" type="checkbox">
-            首行作为表头
+            <input id="scan-full-page" type="checkbox" checked>
+            浏览器渲染时滚动整页，触发懒加载 / 虚拟列表
+          </label>
+
+          <label class="check">
+            <input id="expand-clicks" type="checkbox">
+            浏览器渲染时自动点击「展开 / 加载更多 / 查看全部」按钮
+          </label>
+
+          <div class="template-bar">
+            <label class="label" for="template-select">规则模板</label>
+            <div class="row template-actions">
+              <select id="template-select">
+                <option value="">（未选择模板）</option>
+              </select>
+              <button class="ghost small" id="apply-template" type="button">套用</button>
+              <button class="ghost small" id="delete-template" type="button">删除</button>
+              <button class="ghost small" id="save-template" type="button">保存当前规则</button>
+            </div>
+            <p class="hint">模板保存在本地数据库，记录提取规则而不是数据，可跨任务复用。</p>
+          </div>
+
+          <div id="table-options" class="option-block">
+            <div class="grid2">
+              <div>
+                <label class="label" for="table-index">表格序号（留空 = 自动选最大）</label>
+                <input id="table-index" type="number" min="0" placeholder="自动">
+              </div>
+              <label class="check">
+                <input id="first-row-header" type="checkbox">
+                首行作为表头
+              </label>
+            </div>
+          </div>
+
+          <div id="css-options" class="option-block" hidden>
+            <div class="grid2">
+              <div>
+                <label class="label" for="item-selector">条目选择器</label>
+                <input id="item-selector" type="text" spellcheck="false"
+                       placeholder="例如 div.product-item">
+              </div>
+              <div>
+                <label class="label" for="item-selector-type">选择器类型</label>
+                <select id="item-selector-type">
+                  <option value="css" selected>CSS</option>
+                  <option value="xpath">XPath</option>
+                </select>
+              </div>
+            </div>
+            <label class="label">字段映射</label>
+            <div id="fields"></div>
+            <button class="ghost small" id="add-field" type="button">+ 添加字段</button>
+            <p class="hint">属性填 <code>text</code> 取文本；填 <code>href</code>、<code>src</code>
+              取链接；填 <code>html</code> 取内部 HTML。字段选择器留空表示取条目自身。</p>
+          </div>
+
+          <div id="deep-options" class="option-block" hidden>
+            <label class="check">
+              <input id="deep" type="checkbox">
+              深度抓取（同域多页，自动发现链接与 sitemap）
+            </label>
+            <div class="grid2">
+              <div>
+                <label class="label" for="max-depth">最大深度</label>
+                <input id="max-depth" type="number" min="0" max="5" value="1">
+              </div>
+              <div>
+                <label class="label" for="max-links">最多页面数</label>
+                <input id="max-links" type="number" min="1" max="200" value="10">
+              </div>
+              <div>
+                <label class="label" for="include-pattern">包含链接正则（可选）</label>
+                <input id="include-pattern" type="text" spellcheck="false" placeholder="例如 /article/">
+              </div>
+              <div>
+                <label class="label" for="exclude-pattern">排除链接正则（可选）</label>
+                <input id="exclude-pattern" type="text" spellcheck="false" placeholder="例如 /login|/tag/">
+              </div>
+            </div>
+            <p class="hint">深度抓取仅支持「网页 URL + 智能识别」。每个页面复用首个页面的识别规则，
+              并在结果中新增「来源页面」列。仅抓取同域名页面。</p>
+          </div>
+
+          <label class="check">
+            <input id="ignore-robots" type="checkbox">
+            忽略 robots.txt（请确认你拥有抓取授权）
           </label>
         </div>
-      </div>
-
-      <div id="css-options" class="option-block" hidden>
-        <div class="grid2">
-          <div>
-            <label class="label" for="item-selector">条目选择器</label>
-            <input id="item-selector" type="text" spellcheck="false"
-                   placeholder="例如 div.product-item">
-          </div>
-          <div>
-            <label class="label" for="item-selector-type">选择器类型</label>
-            <select id="item-selector-type">
-              <option value="css" selected>CSS</option>
-              <option value="xpath">XPath</option>
-            </select>
-          </div>
-        </div>
-        <label class="label">字段映射</label>
-        <div id="fields"></div>
-        <button class="ghost small" id="add-field" type="button">+ 添加字段</button>
-        <p class="hint">属性填 <code>text</code> 取文本；填 <code>href</code>、<code>src</code>
-          取链接；填 <code>html</code> 取内部 HTML。字段选择器留空表示取条目自身。</p>
-      </div>
-
-      <div id="deep-options" class="option-block" hidden>
-        <label class="check">
-          <input id="deep" type="checkbox">
-          深度抓取（同域多页，自动发现链接与 sitemap）
-        </label>
-        <div class="grid2">
-          <div>
-            <label class="label" for="max-depth">最大深度</label>
-            <input id="max-depth" type="number" min="0" max="5" value="1">
-          </div>
-          <div>
-            <label class="label" for="max-links">最多页面数</label>
-            <input id="max-links" type="number" min="1" max="200" value="10">
-          </div>
-          <div>
-            <label class="label" for="include-pattern">包含链接正则（可选）</label>
-            <input id="include-pattern" type="text" spellcheck="false" placeholder="例如 /article/">
-          </div>
-          <div>
-            <label class="label" for="exclude-pattern">排除链接正则（可选）</label>
-            <input id="exclude-pattern" type="text" spellcheck="false" placeholder="例如 /login|/tag/">
-          </div>
-        </div>
-        <p class="hint">深度抓取仅支持「网页 URL + 智能识别」。每个页面复用首个页面的识别规则，
-          并在结果中新增「来源页面」列。仅抓取同域名页面。</p>
-      </div>
-
-      <label class="check">
-        <input id="ignore-robots" type="checkbox">
-        忽略 robots.txt（请确认你拥有抓取授权）
-      </label>
       </details>
 
-      <button class="ghost wide" id="visual-pick" type="button">
-        可视化点选：在快照上点击表格 / 列表，自动生成规则
+      <button class="ghost wide visual-pick-btn" id="visual-pick" type="button">
+        <span class="pick-button-icon" aria-hidden="true"></span>
+        <span><b>可视化点选</b><small>点击快照中的表格 / 列表，自动生成规则</small></span>
+        <span class="button-arrow" aria-hidden="true">→</span>
       </button>
 
       <div class="actions">
@@ -205,34 +247,45 @@
         <button class="primary" id="run" type="button">开始抓取</button>
       </div>
 
-      <div id="notice" class="notice" hidden></div>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 
       <div id="analysis" class="analysis" hidden>
         <h3>页面分析</h3>
-        <div id="analysis-summary" class="muted"></div>
+        <div id="analysis-summary" class="muted analysis-summary"></div>
         <div id="analysis-tables"></div>
         <div id="analysis-article" class="article-preview" hidden></div>
       </div>
     </section>
 
     <!-- 中间：结果 -->
-    <section class="panel results">
+    <section class="panel results" data-status="idle">
       <div class="results-head">
-        <h2>采集结果</h2>
-        <span id="job-status" class="pill idle">等待任务</span>
+        <div><span class="panel-index">02 / LIVE OUTPUT</span><h2>采集结果</h2></div>
+        <span id="job-status" class="pill idle" aria-live="polite">等待任务</span>
       </div>
       <div id="job-meta" class="meta-line muted">在左侧配置并开始抓取，结果会显示在这里。</div>
       <div id="exports" class="exports" hidden></div>
       <div id="stats" class="stats"></div>
-      <div id="preview" class="preview"></div>
+      <div class="results-workspace">
+        <div class="workspace-top" aria-hidden="true"><span>DATA PREVIEW</span><span><i></i> REALTIME</span></div>
+        <div id="preview" class="preview">
+          <div class="empty-state idle">
+            <div class="empty-orbit" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
+            <strong>等待数据接入</strong>
+            <p>配置数据源并启动任务<br>结构化结果将在这里实时呈现</p>
+            <small>READY FOR COLLECTION</small>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- 右侧：历史 -->
     <aside class="panel history">
       <div class="results-head">
-        <h2>历史任务</h2>
+        <div><span class="panel-index">03 / ARCHIVE</span><h2>历史任务</h2></div>
         <button class="ghost small" id="refresh-history" type="button">刷新</button>
       </div>
+      <div class="history-caption"><span>最近任务</span><small>LOCAL STORAGE</small></div>
       <div id="history-list" class="history-list">
         <p class="muted small">暂无任务</p>
       </div>
@@ -240,15 +293,17 @@
   </main>
 
   <footer class="footer">
-    仅用于采集你有权访问的公开数据；请遵守目标站点服务条款、robots.txt 与当地法律法规。
+    <span>DATAHARVESTER / INTELLIGENT EXTRACTION</span>
+    <p>仅用于采集你有权访问的公开数据；请遵守目标站点服务条款、robots.txt 与当地法律法规。</p>
   </footer>
 </div>
 
-<div id="pick-modal" class="modal" hidden>
+<div id="pick-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pick-title" hidden>
   <div class="modal-card">
     <header class="modal-head">
       <div>
-        <strong>可视化点选</strong>
+        <span class="panel-index">VISUAL RULE BUILDER</span>
+        <strong id="pick-title">可视化点选</strong>
         <small id="pick-meta" class="muted"></small>
       </div>
       <button class="ghost small" id="pick-close" type="button">关闭</button>

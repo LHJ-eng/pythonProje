@@ -1,6 +1,15 @@
 const form = document.getElementById('login-form');
 const button = document.getElementById('login-btn');
 const errorBox = document.getElementById('login-error');
+const loginCard = document.querySelector('.login-card');
+
+if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  loginCard.addEventListener('pointermove', (event) => {
+    const rect = loginCard.getBoundingClientRect();
+    loginCard.style.setProperty('--glow-x', `${event.clientX - rect.left}px`);
+    loginCard.style.setProperty('--glow-y', `${event.clientY - rect.top}px`);
+  });
+}
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
